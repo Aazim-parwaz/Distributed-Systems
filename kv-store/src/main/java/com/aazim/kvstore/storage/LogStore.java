@@ -20,6 +20,17 @@ public class LogStore {
             throw new RuntimeException("Failed to write to log file", e);
         }
     }
+
+    public synchronized void compact(Map<String, String> latestData) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(LOG_FILE))) {
+            for (Map.Entry<String, String> entry : latestData.entrySet()) {
+                writer.write(entry.getKey() + "=" + entry.getValue());
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to compact log file", e);
+        }
+    }
     // Replay Log
     public Map<String,String> load(){
         Map<String,String> data = new HashMap<>();

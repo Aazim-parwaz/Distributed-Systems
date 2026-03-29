@@ -12,6 +12,8 @@ import java.util.Map;
 public class KeyValService {
     private final InMemoryStore store;
     private final LogStore logStore;
+    private int writeCount = 0;
+    private static final int COMPACTION_THRESHOLD = 5; // compact after every 5 writes
 
     public KeyValService(InMemoryStore store, LogStore logStore) {
         this.store = store;
@@ -30,6 +32,12 @@ public class KeyValService {
     public void put(String key, String value){
         store.put(key,value); // fast path
         logStore.append(key, value); //durability
+        writeCount++;
+        if(writeCount >= COMPACTION_THRESHOLD){
+            logStore.compact(store.getAll()); // compact log
+            writeCount = 0;
+            System.out.println("Log compacted");
+        }
     }
 
     public String get(String key){

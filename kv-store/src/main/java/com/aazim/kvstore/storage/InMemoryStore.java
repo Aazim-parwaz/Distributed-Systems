@@ -1,6 +1,9 @@
 package com.aazim.kvstore.storage;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Component;
+import java.util.HashMap;
+import java.util.Map;
+
 
 @Component
 public class InMemoryStore {
@@ -10,5 +13,8 @@ public class InMemoryStore {
     }
     public String get(String key){
         return store.get(key);
+    }
+    public Map<String,String> getAll(){
+        return new HashMap<>(store); // return a copy for thread safety
     }
 }
