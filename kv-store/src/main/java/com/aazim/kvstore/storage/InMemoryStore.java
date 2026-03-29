@@ -1,6 +1,8 @@
-package main.java.com.aazim.kvstore.storage;
+package com.aazim.kvstore.storage;
 import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.stereotype.Component;
 
+@Component
 public class InMemoryStore {
     private final ConcurrentHashMap<String,String> store = new ConcurrentHashMap<>();
     public void put(String key, String value){
