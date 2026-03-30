@@ -1,5 +1,0 @@
-1) Race Conditions
-2) Linearizability via locking
-3) Tradeoff: correctness vs performance
-4) the difference between method-level locking and thread scheduling
-5) synchronised makes put/get methods to lock.

@@ -14,6 +14,7 @@ public class InMemoryStore {
     public String get(String key){
         return store.get(key);
     }
+    // return the Most general type(interface)
     public Map<String,String> getAll(){
         return new HashMap<>(store); // return a copy for thread safety
     }
