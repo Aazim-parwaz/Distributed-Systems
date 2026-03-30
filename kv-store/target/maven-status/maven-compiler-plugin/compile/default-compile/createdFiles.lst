@@ -1,7 +1,5 @@
 main/java/com/aazim/kvstore/util/FileUtil.class
-main/java/com/aazim/kvstore/storage/LogStore.class
 main/java/com/aazim/kvstore/model/KeyValue.class
 main/java/com/aazim/kvstore/concurrency/LockManager.class
-main/java/com/aazim/kvstore/replication/ReplicationManager.class
 com/aazim/kvstore/storage/InMemoryStore.class
 com/aazim/kvstore/KvStoreApplication.class

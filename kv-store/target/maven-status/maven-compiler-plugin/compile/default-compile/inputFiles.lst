@@ -2,6 +2,7 @@
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/service/KeyValService.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/storage/InMemoryStore.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/storage/LogStore.java
+/Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationTask.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/model/KeyValue.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/util/FileUtil.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationManager.java
