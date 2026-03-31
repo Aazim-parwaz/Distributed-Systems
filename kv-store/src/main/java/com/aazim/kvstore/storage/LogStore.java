@@ -12,6 +12,7 @@ public class LogStore {
 
     private static final String LOG_FILE = "kvstore.log";
 
+    //synchronisation is thread safe
     public synchronized void append(String key, String value) {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(LOG_FILE, true))) {
             writer.write(key + "=" + value);
