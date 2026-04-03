@@ -1,6 +1,4 @@
 package com.aazim.kvstore.replication;
-
-
 import org.springframework.stereotype.Component;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -15,7 +13,8 @@ import java.util.List;
 public class ReplicationManager {
     private final List<String> followers  = List.of(
             "http://localhost:8081/kv",
-            "http://localhost:8082/kv"
+            "http://localhost:8082/kv",
+            "http://localhost:8085/kv"
     );
     private final BlockingQueue<ReplicationTask> replicationQueue = new LinkedBlockingQueue<>();
 
@@ -54,7 +53,7 @@ public class ReplicationManager {
         worker.start();
     }
 
-    // Actual HTTP replication + retry
+    // Actual HTTP async replication + retry
     private void sendToFollowers(ReplicationTask task) {
         for(String follower : followers){
             try {
@@ -87,4 +86,35 @@ public class ReplicationManager {
             }
         }
     }
+
+////////////////////////////// - Quorum code
+
+    // Synchronous send for quorum strategy (returns true if success)
+    private boolean send(String follower, String key, String value) {
+        try {
+            URL url = new URL(follower + "?key=" + key + "&value=" + value);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+
+            conn.setRequestMethod("PUT");
+            conn.setDoOutput(true);
+
+            int responseCode =conn.getResponseCode(); // Trigger the request
+            return responseCode == 200;
+
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public int replicateAndCount(String key, String value){
+        int success = 1; // leader itself
+        
+        for(String follower:followers){
+            if(send(follower,key,value)){
+                success++;
+            }
+        }
+        return success;
+    }
 }
+
