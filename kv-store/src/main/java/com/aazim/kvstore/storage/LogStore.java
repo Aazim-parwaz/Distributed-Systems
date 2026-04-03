@@ -11,12 +11,22 @@ import java.util.Map;
 public class LogStore {
 
     private static final String LOG_FILE = "kvstore.log";
-
+    private int writeCount = 0;
+    private static final int COMPACTION_THRESHOLD = 5; // compact after every 5 writes
+    
     //synchronisation is thread safe
     public synchronized void append(String key, String value) {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(LOG_FILE, true))) {
             writer.write(key + "=" + value);
             writer.newLine();
+            writeCount++;
+
+            if(writeCount >= COMPACTION_THRESHOLD) {
+                Map<String, String> latestData = load(); // load current state
+                compact(latestData); // compact using current state
+                writeCount = 0; // reset count after compaction
+            }
+
         } catch (IOException e) {
             throw new RuntimeException("Failed to write to log file", e);
         }
