@@ -2,65 +2,74 @@ package com.aazim.kvstore.service;
 
 import com.aazim.kvstore.storage.InMemoryStore;
 import com.aazim.kvstore.storage.LogStore;
-import com.aazim.kvstore.replication.ReplicationManager;
+import com.aazim.kvstore.storage.FileLogStore;
+import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.replication.ReplicationStrategy;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import com.aazim.kvstore.replication.ReplicationStrategyFactory;
+import com.aazim.kvstore.model.LogEntry;
 
 import jakarta.annotation.PostConstruct;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class KeyValService {
-    
 
-    private final InMemoryStore store;
+    private final Map<String,ValueEntry> store = new ConcurrentHashMap<>();
     private final LogStore logStore;
-    
-
-    @Value("${node.role}")
-    private String nodeRole; // "leader" or "follower"
-    
-
-    @Autowired
-    private ReplicationStrategyFactory replicationStrategyFactory;
+    private final ReplicationStrategyFactory strategyFactory;
 
     private ReplicationStrategy replicationStrategy;
 
+    public KeyValService(LogStore logStore, ReplicationStrategyFactory strategyFactory){
+        this.logStore = logStore;
+        this.strategyFactory = strategyFactory;
+    }
+
     @PostConstruct
     public void init(){
-        // load state from log
-        Map<String,String> data = logStore.load(); //replay log
-        data.forEach(store::put); //load into memory
         
-
         //init replication strategy based on config
-        this.replicationStrategy = replicationStrategyFactory.getStrategy();
-
-        System.out.println("Recovered " + data.size() + " records from log");
+        this.replicationStrategy = strategyFactory.getStrategy();
+        recoverFromLogs();
+        System.out.println("Recovered " + store.size() + " records from log");
 
     }
 
+    public boolean put(String key, String value){
+        long ts = System.currentTimeMillis();
 
-    public KeyValService(InMemoryStore store, LogStore logStore,ReplicationManager replicationManager) {
-        this.store = store;
-        this.logStore = logStore;
-    }
-    
-    public void put(String key, String value){
-        store.put(key,value); // fast in-memory write
-        logStore.append(key, value); //durability
+        store.put(key, new ValueEntry(value, ts)); // fast in-memory write
+        logStore.append(key, value,ts); //durability
+        boolean success = replicationStrategy != null && replicationStrategy.handleWrite(key, value, ts); //Deligate write handling to strategy
 
-        //only leader replicates to followers
-        if ("leader".equals(nodeRole)){
-            replicationStrategy.replicate(key, value); //replicate to followers
-        }
+        return success;
         
     }
-    public String get(String key){
+
+    public ValueEntry get(String key){
         return store.get(key);
     }
+
+    public Map<String,ValueEntry> getAll(){
+        return new HashMap<>(store); // return a copy for thread safety
+    }
+
+    private void recoverFromLogs(){
+        List<LogEntry> entries = logStore.readAll();
+
+        for (LogEntry entry: entries){
+            ValueEntry existing = store.get(entry.getKey());
+
+            if(existing == null || entry.getTimestamp() > existing.getTimestamp()){
+                store.put(entry.getKey(), new ValueEntry(entry.getValue(), entry.getTimestamp()));
+            }
+        }
+        System.out.println("Recovery completed. Loaded keys: "+ store.size());
+    }
+
 }

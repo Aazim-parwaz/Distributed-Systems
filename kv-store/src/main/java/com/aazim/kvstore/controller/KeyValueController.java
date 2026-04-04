@@ -1,5 +1,6 @@
 package com.aazim.kvstore.controller;
 
+import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
 import org.springframework.web.bind.annotation.*;
 
@@ -12,15 +13,13 @@ public class KeyValueController {
         this.service = service;
     }
 
-    @PutMapping
+    @PutMapping("/put")
     public String put(@RequestParam String key, @RequestParam String value) {
-        service.put(key, value);
-        return "OK";
+        return service.put(key, value) ? "SUCCESS" : "FAILURE";
     }
 
-    @GetMapping
-    public String get(@RequestParam String key) {
-        String value = service.get(key);
-        return value != null ? value : "Key not found";
+    @GetMapping("/get")
+    public ValueEntry get(@RequestParam String key) {
+        return service.get(key);
     }
 }
