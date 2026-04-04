@@ -71,5 +71,9 @@ public class KeyValService {
         }
         System.out.println("Recovery completed. Loaded keys: "+ store.size());
     }
+    public void putInternal(String key, String value, long ts){
+        store.put(key, new ValueEntry(value, ts)); // fast in-memory write
+        logStore.append(key, value,ts); //durability
+    }
 
 }

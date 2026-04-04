@@ -2,9 +2,11 @@ package com.aazim.kvstore.storage;
 
 import com.aazim.kvstore.model.ValueEntry;
 
-import lombok.extern.java.Log;
+import jakarta.annotation.PostConstruct;
 
 import com.aazim.kvstore.model.LogEntry;
+
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 
@@ -15,8 +17,17 @@ import java.util.*;
 @Component
 public class FileLogStore implements LogStore{
 
-    private final File LOG_FILE = new File("kvstore.log");
+    @Value("${node.id}")
+    private String nodeId;
+
+    private File LOG_FILE;
     private final Object writeLock  = new Object();
+
+
+    @PostConstruct
+    public void init(){
+        LOG_FILE = new File("kvstore_" + nodeId + ".log");
+    }
 
     
     
@@ -68,41 +79,13 @@ public class FileLogStore implements LogStore{
             throw new RuntimeException("Failed to write compacted log file", e);
         }
         synchronized (writeLock) {
-            
+            if(LOG_FILE.exists() && !LOG_FILE.delete()){
+                throw new RuntimeException("Failed to delete old log file during compaction");
+            }
             if (!tempFile.renameTo(LOG_FILE)) {
                 throw new RuntimeException("Failed to replace log file with compacted version");
             }
-            LOG_FILE.delete(); // Delete old log file
         }
     }
-    public synchronized void compact(Map<String, String> latestData) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(LOG_FILE))) {
-            for (Map.Entry<String, String> entry : latestData.entrySet()) {
-                writer.write(entry.getKey() + "=" + entry.getValue());
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to compact log file", e);
-        }
-    }
-    // Replay Log
-    public Map<String,String> load(){
-        Map<String,String> data = new HashMap<>();
-        File file = new File(LOG_FILE);
-        if(!file.exists()){
-            return data; // No log file, return empty map
-        }
-        try (BufferedReader reader = new BufferedReader(new FileReader(LOG_FILE))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("=", 2);
-                if (parts.length == 2) {
-                    data.put(parts[0], parts[1]); //last write wins
-                }
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to read log file", e);
-        }
-        return data;
-    }
+    
 }

@@ -2,6 +2,7 @@ package com.aazim.kvstore.controller;
 
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
+
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -21,5 +22,18 @@ public class KeyValueController {
     @GetMapping("/get")
     public ValueEntry get(@RequestParam String key) {
         return service.get(key);
+    }
+    @PostMapping("/internal/replicate")
+    public boolean replicate(@RequestParam String key, @RequestParam String value, @RequestParam long ts){
+        ValueEntry existing = new ValueEntry(value, ts);
+        System.out.println("Existing value for key: " + key + " is " + existing.getValue() + " with timestamp: " + existing.getTimestamp());
+        // System.out.println("Received replication for key: " + key + ", value: " + value + ", timestamp: " + ts);
+        //last write wins
+        if (existing ==null || existing.getTimestamp() < ts){
+
+            System.out.println("Received replication for key: " + key + ", value: " + value + ", timestamp: " + ts);
+            service.putInternal(key, value,ts);    
+        }
+        return true;
     }
 }
