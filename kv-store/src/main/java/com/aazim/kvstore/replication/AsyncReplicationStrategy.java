@@ -1,7 +1,9 @@
 package com.aazim.kvstore.replication;
 
+import java.util.Arrays;
 import java.util.List;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -13,15 +15,19 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     private final RestTemplate restTemplate = new RestTemplate();
 
     //followers
-    private final List<String> nodes  = List.of(
-        "http://localhost:8081/kv/internal/replicate",
-        "http://localhost:8082/kv/internal/replicate"
-    );
+    @Value("${Nodes}")
+    private String nodesConfig;
+    
+    // private final List<String> nodes  = List.of(
+    //     "http://localhost:8081/kv/internal/replicate",
+    //     "http://localhost:8082/kv/internal/replicate"
+    // );
 
     @Override
     public boolean handleWrite(String key, String value, long timestamp){
+        List<String> nodes = Arrays.asList(nodesConfig.split(","));
         for (String node: nodes){
-
+            node = "http://"+node+"/kv/internal/replicate";
             sendAsync(node,key,value,timestamp);
         }
 
@@ -41,6 +47,7 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public List<String> getNodes() {
+        List<String> nodes = Arrays.asList(nodesConfig.split(","));
         return nodes;
     }
 
