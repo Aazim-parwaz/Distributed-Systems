@@ -24,7 +24,7 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     // );
 
     @Override
-    public boolean handleWrite(String key, String value, long timestamp){
+    public boolean replicate(String key, String value, long timestamp){
         List<String> nodes = Arrays.asList(nodesConfig.split(","));
         for (String node: nodes){
             node = "http://"+node+"/kv/internal/replicate";
@@ -50,7 +50,7 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
         List<String> nodes = Arrays.asList(nodesConfig.split(","));
         return nodes;
     }
-
+    // i don't have any /internal/get api point- need to fix this also.
     @Override
     public ValueEntry fetchFromNode(String node, String key) {
         try {

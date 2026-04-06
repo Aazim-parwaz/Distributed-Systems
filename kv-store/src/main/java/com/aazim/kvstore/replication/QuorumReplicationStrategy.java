@@ -1,6 +1,4 @@
 package com.aazim.kvstore.replication;
-
-import java.lang.reflect.Array;
 import java.util.Arrays;
 import java.util.List;
 
@@ -27,7 +25,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     // );
 
     @Override
-    public boolean handleWrite(String key, String value, long timestamp){
+    public boolean replicate(String key, String value, long timestamp){
         List<String> nodes = Arrays.asList(nodesConfig.split(","));
 
         int totalNodes = nodes.size() + 1; // including self
@@ -72,6 +70,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         return nodes;
     }
 
+    // this needs to be edited for quorum read strategy
     @Override
     public ValueEntry fetchFromNode(String node, String key) {
         try {

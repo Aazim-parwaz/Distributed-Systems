@@ -36,10 +36,10 @@ public class KeyValService {
 
     private final RestTemplate restTemplate = new RestTemplate();
     
-    public KeyValService(LogStore logStore, ReplicationStrategyFactory strategyFactory){
-        this.logStore = logStore;
-        this.strategyFactory = strategyFactory;
-    }
+    // public KeyValService(LogStore logStore, ReplicationStrategyFactory strategyFactory){
+    //     this.logStore = logStore;
+    //     this.strategyFactory = strategyFactory;
+    // }
 
     @PostConstruct
     public void init(){
@@ -50,12 +50,20 @@ public class KeyValService {
         System.out.println("Recovered " + store.size() + " records from log");
 
     }
-    public boolean handleWrite(String key, String value){
+    public boolean replicate(String key, String value){
         long ts = System.currentTimeMillis();
 
         putInternal(key, value, ts);
-        return replicationStrategy != null && replicationStrategy.handleWrite(key, value, ts); //Deligate write handling to strategy
+        return replicationStrategy != null && replicationStrategy.replicate(key, value, ts); //Deligate write handling to strategy
         
+    }
+    public void putInternal(String key, String value, long ts){
+        ValueEntry existing = store.get(key);
+
+        if (existing == null || ts > existing.getTimestamp()){
+            store.put(key, new ValueEntry(value, ts)); // fast in-memory write
+            logStore.append(key, value,ts); //durability
+        }
     }
 
     public boolean put(String key, String value){
@@ -63,7 +71,7 @@ public class KeyValService {
 
         store.put(key, new ValueEntry(value, ts)); // fast in-memory write
         logStore.append(key, value,ts); //durability
-        boolean success = replicationStrategy != null && replicationStrategy.handleWrite(key, value, ts); //Deligate write handling to strategy
+        boolean success = replicationStrategy != null && replicationStrategy.replicate(key, value, ts); //Deligate write handling to strategy
 
         return success;
         
@@ -89,18 +97,11 @@ public class KeyValService {
         }
         System.out.println("Recovery completed. Loaded keys: "+ store.size());
     }
-    public void putInternal(String key, String value, long ts){
-        ValueEntry existing = store.get(key);
-
-        if (existing == null || ts > existing.getTimestamp()){
-            store.put(key, new ValueEntry(value, ts)); // fast in-memory write
-            logStore.append(key, value,ts); //durability
-        }
-    }
-    // internal read
-    public ValueEntry getValueEntry(String key){
-        return store.get(key);
-    }
+    
+    // // internal read
+    // public ValueEntry getValueEntry(String key){
+    //     return store.get(key);
+    // }
     // read quorum + read repair
     public String handleRead(String key){
         
@@ -157,4 +158,4 @@ public class KeyValService {
         }
     }
 
-}
+
