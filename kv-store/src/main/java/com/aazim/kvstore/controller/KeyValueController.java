@@ -35,4 +35,9 @@ public class KeyValueController {
         }
         return true;
     }
+    // internal read (used by other nodes for quorum reads)
+    @GetMapping("/internal/get")
+    public ValueEntry internalGet(@RequestParam String key){
+        return service.get(key);
+    }
 }

@@ -1,4 +1,5 @@
 package com.aazim.kvstore.replication;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -69,15 +70,55 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         List<String> nodes = Arrays.asList(nodesConfig.split(","));
         return nodes;
     }
-
-    // this needs to be edited for quorum read strategy
+    
     @Override
-    public ValueEntry fetchFromNode(String node, String key) {
-        try {
-            return restTemplate.getForObject(node.replace("/replicate", "/get")+"?key={k}", ValueEntry.class, key);
-        } catch (Exception e) {
-            return null; 
+    public ValueEntry read(String key, ValueEntry localValue) {
+        List<String> nodes = getNodes();
+
+        int totalNodes = nodes.size() + 1; // including self
+        int readQuorum = (totalNodes / 2) + 1; // majority for read
+
+        List<ValueEntry> responses = new ArrayList<>();
+        //local read
+        if (localValue != null) {
+            responses.add(localValue);
         }
+        //remote read
+        for (String node: nodes){
+            try {
+                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
+                if (entry != null) {
+                    responses.add(entry);
+                }
+            } catch (Exception e) {
+                System.err.println("Failed to read from " + node + ": " + e.getMessage());
+            }
+        }
+        if (responses.size() < readQuorum) {
+            throw new RuntimeException("Read quorum not met. Available replicas: " + responses.size() + "/" + readQuorum); 
+        }
+
+        //Last write wins
+        ValueEntry latest = responses.stream().max((e1, e2) -> Long.compare(e1.getTimestamp(), e2.getTimestamp())).orElse(null);
+        if (latest == null) {
+            return null;
+        }
+
+        //Read repair
+        for (String node: nodes){
+            try {
+                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
+                if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
+                    // send repair
+                    restTemplate.postForObject("http://"+node+"/kv/internal/replicate?key="+key
+                        +"&value="+latest.getValue()+"&ts="+latest.getTimestamp(), null, String.class);
+                    System.out.println("Sent read repair to " + node + ": " + key + "=" + latest.getValue());
+                }
+            } catch (Exception e) {
+                System.err.println("Failed to send read repair to " + node + ": " + e.getMessage());
+            }
+        }
+        return latest;
     }
 
     

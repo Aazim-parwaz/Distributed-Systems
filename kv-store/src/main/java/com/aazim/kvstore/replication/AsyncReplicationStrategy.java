@@ -52,12 +52,9 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     }
     // i don't have any /internal/get api point- need to fix this also.
     @Override
-    public ValueEntry fetchFromNode(String node, String key) {
-        try {
-            return restTemplate.getForObject(node+"/internal/get?key={k}", ValueEntry.class, key);
-        } catch (Exception e) {
-            return null; 
-        }
+    public ValueEntry read(String key, ValueEntry localValue) {
+        // For simplicity, we just return the local value. In a real implementation, we would fetch from followers and apply a strategy.
+        return localValue;
     }
     
 }

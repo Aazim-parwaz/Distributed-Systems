@@ -98,64 +98,6 @@ public class KeyValService {
         System.out.println("Recovery completed. Loaded keys: "+ store.size());
     }
     
-    // // internal read
-    // public ValueEntry getValueEntry(String key){
-    //     return store.get(key);
-    // }
-    // read quorum + read repair
-    public String handleRead(String key){
-        
-        List<String> nodes = replicationStrategy.getNodes();
-
-        int totalNodes = nodes.size() + 1; // including self
-        int readQuorum = (totalNodes / 2) + 1; // majority
-
-        List<ValueEntry> response = new ArrayList<>();
-
-        ValueEntry localEntry = store.get(key);
-        if(localEntry != null){
-            response.add(localEntry);
-        }
-
-        for(String node:nodes){
-            try {
-                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key={k}", ValueEntry.class, key);
-                if (entry != null){
-                    response.add(entry);
-                }
-            } catch (Exception e) {
-                System.err.println("Failed to fetch from " + node + ": " + e.getMessage());
-            }
-        }
-
-        // quorum check
-        if (response.size() < readQuorum){
-            throw new RuntimeException("Read quorum not met. Available replicas: " + response.size() + "/" + readQuorum);
-        }
-
-
-        //Last write wins
-        ValueEntry latest = response.stream().max(Comparator.comparingLong(ValueEntry::getTimestamp)).orElse(null);
-        if (latest ==null) return null;
-
-        //Read repair
-        for (String node:nodes){
-            try {
-                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key={k}", ValueEntry.class, key);
-                if (entry == null || entry.getTimestamp() < latest.getTimestamp()){
-                    // send repair
-                    restTemplate.postForObject("http://"+node+"/kv/internal/replicate?key={k}&value={v}&ts={t}", null, String.class, key, latest.getValue(), latest.getTimestamp());
-                    System.out.println("Sent read repair to " + node + ": " + key + "=" + latest.getValue());
-                }
-            } catch (Exception e) {
-                System.err.println("Failed to send read repair to " + node + ": " + e.getMessage());
-            }
-        }
-        return latest.getValue();
-
-        
-
-        }
     }
 
 
