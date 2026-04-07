@@ -12,5 +12,4 @@
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/concurrency/LockManager.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/service/KeyValService.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/scheduler/CompactionService.java
-/Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/util/FileUtil.java
 /Users/apshafi/codes/Projects/kv-store/src/main/java/com/aazim/kvstore/replication/QuorumReplicationStrategy.java

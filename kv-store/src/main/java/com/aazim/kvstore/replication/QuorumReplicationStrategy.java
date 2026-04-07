@@ -27,7 +27,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
-        List<String> nodes = Arrays.asList(nodesConfig.split(","));
+        List<String> nodes = Arrays.stream(nodesConfig.split(",")).map(String::trim).toList();
 
         int totalNodes = nodes.size() + 1; // including self
         int majority = (totalNodes / 2) + 1;
@@ -70,7 +70,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         List<String> nodes = Arrays.asList(nodesConfig.split(","));
         return nodes;
     }
-    
+
     @Override
     public ValueEntry read(String key, ValueEntry localValue) {
         List<String> nodes = getNodes();

@@ -9,7 +9,6 @@ import com.aazim.kvstore.replication.ReplicationStrategy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import com.aazim.kvstore.replication.ReplicationStrategyFactory;
 import com.aazim.kvstore.model.LogEntry;
@@ -33,13 +32,6 @@ public class KeyValService {
     private String nodesConfig;
 
     private ReplicationStrategy replicationStrategy;
-
-    private final RestTemplate restTemplate = new RestTemplate();
-    
-    // public KeyValService(LogStore logStore, ReplicationStrategyFactory strategyFactory){
-    //     this.logStore = logStore;
-    //     this.strategyFactory = strategyFactory;
-    // }
 
     @PostConstruct
     public void init(){
