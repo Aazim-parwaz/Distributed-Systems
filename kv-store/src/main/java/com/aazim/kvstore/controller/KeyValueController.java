@@ -2,7 +2,8 @@ package com.aazim.kvstore.controller;
 
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
-
+import org.apache.catalina.connector.Response;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -20,9 +21,16 @@ public class KeyValueController {
     }
 
     @GetMapping("/get")
-    public ValueEntry get(@RequestParam String key) {
-        return service.get(key);
+    public ResponseEntity<String> get(@RequestParam String key) {
+        ValueEntry entry = service.read(key);
+        if (entry != null) {
+            return ResponseEntity.ok(entry.getValue());
+        } else {
+            return ResponseEntity.status(Response.SC_NOT_FOUND).body("Key not found");
+        }
     }
+        
+
     @PostMapping("/internal/replicate")
     public boolean replicate(@RequestParam String key, @RequestParam String value, @RequestParam long ts){
         ValueEntry existing = service.get(key);
@@ -37,7 +45,7 @@ public class KeyValueController {
     }
     // internal read (used by other nodes for quorum reads)
     @GetMapping("/internal/get")
-    public ValueEntry internalGet(@RequestParam String key){
-        return service.get(key);
+    public ValueEntry read(@RequestParam String key){
+        return service.getValueEntry(key);
     }
 }

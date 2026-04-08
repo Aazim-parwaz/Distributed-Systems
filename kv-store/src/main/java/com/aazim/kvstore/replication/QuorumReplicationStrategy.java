@@ -2,7 +2,6 @@ package com.aazim.kvstore.replication;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,18 +11,11 @@ import com.aazim.kvstore.model.ValueEntry;
 public class QuorumReplicationStrategy implements ReplicationStrategy {
     private final RestTemplate restTemplate = new RestTemplate();
 
-    //followers
-    
     @Value("${write.quorum:2}")
     private int writeQuorum; // default to 2 if not set
 
     @Value("${Nodes}")
     private String nodesConfig;
-
-    // private final List<String> nodes  = List.of(
-    //     "http://localhost:8081/kv/internal/replicate",
-    //     "http://localhost:8082/kv/internal/replicate"
-    // );
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
@@ -52,6 +44,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
                     successCount++;
                     System.out.println("Replication successful for " + node);
 
+                    // Early exit if we already have enough successful writes to meet the quorum(this works for quorum but not in async)
                     if (successCount >= effectiveQuorum) {
                         System.out.println("Write quorum achieved with " + successCount + "/" + effectiveQuorum);
                         return true; // We have enough successful writes, no need to continue

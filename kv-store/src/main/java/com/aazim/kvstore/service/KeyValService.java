@@ -89,7 +89,16 @@ public class KeyValService {
         }
         System.out.println("Recovery completed. Loaded keys: "+ store.size());
     }
+    public ValueEntry read(String key){
+        ValueEntry localValue = store.get(key);
+        if (replicationStrategy != null){
+            return replicationStrategy.read(key, localValue);
+        }
+        return localValue;
     
     }
-
+    public ValueEntry getValueEntry(String key){
+        return store.get(key);
+    }
+}
 

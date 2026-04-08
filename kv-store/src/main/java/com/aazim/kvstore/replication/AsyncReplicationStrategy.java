@@ -16,10 +16,6 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     @Value("${Nodes}")
     private String nodesConfig;
     
-    // private final List<String> nodes  = List.of(
-    //     "http://localhost:8081/kv/internal/replicate",
-    //     "http://localhost:8082/kv/internal/replicate"
-    // );
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
