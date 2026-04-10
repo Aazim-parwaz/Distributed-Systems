@@ -91,7 +91,9 @@ public class KeyValService {
     }
     public ValueEntry read(String key){
         ValueEntry localValue = store.get(key);
+        System.out.println("Local read for key: " + key + ", value: " + (localValue != null ? localValue.getValue() : "null"));
         if (replicationStrategy != null){
+            System.out.println("Performing strategy-based read for key: " + key);
             return replicationStrategy.read(key, localValue);
         }
         return localValue;

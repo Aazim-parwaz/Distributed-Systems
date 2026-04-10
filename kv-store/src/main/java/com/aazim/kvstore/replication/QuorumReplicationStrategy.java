@@ -2,10 +2,22 @@ package com.aazim.kvstore.replication;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.context.event.EventListener;
+
 import com.aazim.kvstore.model.ValueEntry;
+
+import ch.qos.logback.core.subst.Node;
+import jakarta.annotation.PostConstruct;
 
 @Component
 public class QuorumReplicationStrategy implements ReplicationStrategy {
@@ -16,6 +28,19 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
 
     @Value("${Nodes}")
     private String nodesConfig;
+
+    @Autowired
+    private WebServerApplicationContext context;
+
+    private String selfNode;
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void init() {
+        int port = context.getWebServer().getPort();
+        String selfNode = "http://localhost:" + port; 
+        System.out.println("Node started on port: " + port);
+
+    }
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
@@ -71,47 +96,90 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         int totalNodes = nodes.size() + 1; // including self
         int readQuorum = (totalNodes / 2) + 1; // majority for read
 
-        List<ValueEntry> responses = new ArrayList<>();
-        //local read
-        if (localValue != null) {
-            responses.add(localValue);
-        }
+        // List<ValueEntry> responses = new ArrayList<>();
+        // //local read
+        // if (localValue != null) {
+        //     responses.add(localValue);
+        // }
+
+        List<CompletableFuture<NodeResponse>> futures = new ArrayList<>();
+
+        futures.add(CompletableFuture.completedFuture(new NodeResponse(selfNode, localValue)));
+
+
+
         //remote read
         for (String node: nodes){
+            CompletableFuture<NodeResponse> future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    // System.out.println("Fetching from " + node + " for key: " + key);
+                    ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
+                    return new NodeResponse(node, entry);
+                } catch (Exception e) {
+                    System.err.println("Failed to read from " + node + ": " + e.getMessage());
+                    return new NodeResponse(node, null); // Return null on failure
+                }
+            });
+            futures.add(future);
+        }
+
+        List<NodeResponse> responses = new ArrayList<>();
+
+        // Early quorum exit: Wait for responses and check if we have enough to meet the quorum before waiting for all
+
+        for (CompletableFuture<NodeResponse> future : futures) {
             try {
-                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
-                if (entry != null) {
-                    responses.add(entry);
+                NodeResponse res = future.get(500,TimeUnit.MILLISECONDS); // Wait for each read to complete
+                responses.add(res);
+                if(responses.size() >= readQuorum){
+                    break; // We have enough responses to meet the quorum, no need to wait for more
                 }
             } catch (Exception e) {
-                System.err.println("Failed to read from " + node + ": " + e.getMessage());
+                System.err.println("Error while waiting for read response: " + e.getMessage());
             }
         }
+
+        
+        // Same quorum check after waiting for responses, in case we didn't meet it during the early exit
         if (responses.size() < readQuorum) {
             throw new RuntimeException("Read quorum not met. Available replicas: " + responses.size() + "/" + readQuorum); 
         }
 
-        //Last write wins
-        ValueEntry latest = responses.stream().max((e1, e2) -> Long.compare(e1.getTimestamp(), e2.getTimestamp())).orElse(null);
-        if (latest == null) {
-            return null;
-        }
+        List<ValueEntry> validEntries = responses.stream().map(NodeResponse::getEntry).filter(e -> e != null).toList();
 
-        //Read repair
-        for (String node: nodes){
-            try {
-                ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
-                if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
-                    // send repair
-                    restTemplate.postForObject("http://"+node+"/kv/internal/replicate?key="+key
+        //Last write wins
+        ValueEntry latest = getLatest(validEntries);
+
+        if (latest == null) {
+            return null; // No valid entries found
+        }
+        
+        // Make repari async (non-blocking)
+        CompletableFuture.runAsync(() -> repairNodes(key, latest, responses));
+
+        return latest;
+    }
+
+    private ValueEntry getLatest(List<ValueEntry> responses){
+        return responses.stream().filter(e -> e != null).max((e1,e2) -> Long.compare(e1.getTimestamp(), e2.getTimestamp())).orElse(null);
+    }
+
+    
+
+    private void repairNodes(String key,ValueEntry latest, List<NodeResponse> responses){
+        System.out.println("Starting read repair for key: " + key);
+        for (NodeResponse res: responses){
+            ValueEntry entry = res.getEntry();
+            if (entry == null || entry.getTimestamp() < latest.getTimestamp()){
+                try {
+                    restTemplate.postForObject("http://"+res.getNode()+"/kv/internal/replicate?key="+key
                         +"&value="+latest.getValue()+"&ts="+latest.getTimestamp(), null, String.class);
-                    System.out.println("Sent read repair to " + node + ": " + key + "=" + latest.getValue());
+                    System.out.println("Sent read repair to " + res.getNode() + ": " + key + "=" + latest.getValue());
+                } catch (Exception e) {
+                    System.err.println("Failed to send read repair to " + res.getNode() + ": " + e.getMessage());
                 }
-            } catch (Exception e) {
-                System.err.println("Failed to send read repair to " + node + ": " + e.getMessage());
             }
         }
-        return latest;
     }
 
     
