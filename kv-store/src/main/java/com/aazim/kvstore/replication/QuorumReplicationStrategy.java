@@ -1,7 +1,9 @@
 package com.aazim.kvstore.replication;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +39,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         int port = context.getWebServer().getPort();
-        String selfNode = "http://localhost:" + port; 
+        selfNode = "http://localhost:" + port; 
         System.out.println("Node started on port: " + port);
 
     }
@@ -105,7 +107,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         List<CompletableFuture<NodeResponse>> futures = new ArrayList<>();
 
         futures.add(CompletableFuture.completedFuture(new NodeResponse(selfNode, localValue)));
-
+        System.out.println("Self Node: "+selfNode);
 
 
         //remote read
@@ -169,16 +171,36 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     private void repairNodes(String key,ValueEntry latest, List<NodeResponse> responses){
         System.out.println("Starting read repair for key: " + key);
         for (NodeResponse res: responses){
+            System.out.println("checkpoint 1");
+            
+            String node = res.getNode();
+            System.out.println("checking node: " + node);   
+            System.out.println(node + "then "+ selfNode);
+            if (node!=null && node.equals(selfNode)){
+                System.out.println("self skipped");
+                continue; // Skip self
+            }
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()){
                 try {
-                    restTemplate.postForObject("http://"+res.getNode()+"/kv/internal/replicate?key="+key
-                        +"&value="+latest.getValue()+"&ts="+latest.getTimestamp(), null, String.class);
+                    System.out.println("checkpoint 2");
+                    System.out.println("Repairing node " + node + " for key: " + key + ". Latest value: " + latest.getValue() + ", Node value: " + (entry != null ? entry.getValue() : "null"));
+                    String url = "http://" + node + "/kv/internal/replicate";
+                    System.out.println(url);
+                    Map<String, Object> request = new HashMap<>();
+
+                    request.put("key", key);
+                    request.put("value", latest.getValue());
+                    request.put("ts", latest.getTimestamp());
+
+                    restTemplate.postForObject(url,request, Boolean.class);
                     System.out.println("Sent read repair to " + res.getNode() + ": " + key + "=" + latest.getValue());
                 } catch (Exception e) {
                     System.err.println("Failed to send read repair to " + res.getNode() + ": " + e.getMessage());
                 }
             }
+            System.out.println("checkpoint 3");
+            
         }
     }
 
