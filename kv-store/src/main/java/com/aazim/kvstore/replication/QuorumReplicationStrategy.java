@@ -4,10 +4,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,8 +16,6 @@ import org.springframework.context.event.EventListener;
 
 import com.aazim.kvstore.model.ValueEntry;
 
-import ch.qos.logback.core.subst.Node;
-import jakarta.annotation.PostConstruct;
 
 @Component
 public class QuorumReplicationStrategy implements ReplicationStrategy {
@@ -39,14 +35,17 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         int port = context.getWebServer().getPort();
-        selfNode = "http://localhost:" + port; 
+        selfNode = "localhost:" + port; 
         System.out.println("Node started on port: " + port);
 
     }
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
-        List<String> nodes = Arrays.stream(nodesConfig.split(",")).map(String::trim).toList();
+        List<String> nodes = Arrays.stream(nodesConfig.split(","))
+                                                        .map(String::trim)
+                                                        .filter(node -> !node.equals(selfNode)) // IMPORTANT
+                                                        .toList();
 
         int totalNodes = nodes.size() + 1; // including self
         int majority = (totalNodes / 2) + 1;
@@ -94,6 +93,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     @Override
     public ValueEntry read(String key, ValueEntry localValue) {
         List<String> nodes = getNodes();
+        System.out.println("Nodes for read: " + nodes);
 
         int totalNodes = nodes.size() + 1; // including self
         int readQuorum = (totalNodes / 2) + 1; // majority for read
@@ -114,7 +114,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         for (String node: nodes){
             CompletableFuture<NodeResponse> future = CompletableFuture.supplyAsync(() -> {
                 try {
-                    // System.out.println("Fetching from " + node + " for key: " + key);
+                    System.out.println("Fetching from " + node + " for key: " + key);
                     ValueEntry entry = restTemplate.getForObject("http://"+node+"/kv/internal/get?key="+key, ValueEntry.class);
                     return new NodeResponse(node, entry);
                 } catch (Exception e) {
@@ -140,7 +140,6 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
                 System.err.println("Error while waiting for read response: " + e.getMessage());
             }
         }
-
         
         // Same quorum check after waiting for responses, in case we didn't meet it during the early exit
         if (responses.size() < readQuorum) {
