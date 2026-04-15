@@ -42,10 +42,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public boolean replicate(String key, String value, long timestamp){
-        List<String> nodes = Arrays.stream(nodesConfig.split(","))
-                                                        .map(String::trim)
-                                                        .filter(node -> !node.equals(selfNode)) // IMPORTANT
-                                                        .toList();
+        List<String> nodes = getNodes();
 
         int totalNodes = nodes.size() + 1; // including self
         int majority = (totalNodes / 2) + 1;
@@ -86,7 +83,10 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     }
     @Override
     public List<String> getNodes() {
-        List<String> nodes = Arrays.asList(nodesConfig.split(","));
+        List<String> nodes = Arrays.stream(nodesConfig.split(","))
+                                                        .map(String::trim)
+                                                        .filter(node -> !node.equals(selfNode))
+                                                        .toList();
         return nodes;
     }
 
@@ -155,7 +155,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
             return null; // No valid entries found
         }
         
-        // Make repari async (non-blocking)
+        // Make repair async (non-blocking)
         CompletableFuture.runAsync(() -> repairNodes(key, latest, responses));
 
         return latest;
@@ -174,7 +174,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
             
             String node = res.getNode();
             System.out.println("checking node: " + node);   
-            System.out.println(node + "then "+ selfNode);
+            System.out.println(node + " then "+ selfNode);
             if (node!=null && node.equals(selfNode)){
                 System.out.println("self skipped");
                 continue; // Skip self
