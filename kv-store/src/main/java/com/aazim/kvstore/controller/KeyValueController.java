@@ -1,7 +1,13 @@
 package com.aazim.kvstore.controller;
 
+import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
+
+import org.apache.catalina.connector.Response;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import com.aazim.kvstore.model.ReplicationRequest;
 
 @RestController
 @RequestMapping("/kv")
@@ -12,15 +18,32 @@ public class KeyValueController {
         this.service = service;
     }
 
-    @PutMapping
+    @PutMapping("/put")
     public String put(@RequestParam String key, @RequestParam String value) {
-        service.put(key, value);
-        return "OK";
+        return service.put(key, value) ? "SUCCESS" : "FAILURE";
     }
 
-    @GetMapping
-    public String get(@RequestParam String key) {
-        String value = service.get(key);
-        return value != null ? value : "Key not found";
+    @GetMapping("/get")
+    public ResponseEntity<String> get(@RequestParam String key) {
+        ValueEntry entry = service.read(key);
+        if (entry != null) {
+            return ResponseEntity.ok(entry.getValue());
+        } else {
+            return ResponseEntity.status(Response.SC_NOT_FOUND).body("Key not found");
+        }
+    }
+
+    // Follower write path — coordinator has already assigned the timestamp.
+    // putInternal handles last-write-wins internally; no need to re-check here.
+    @PostMapping("/internal/replicate")
+    public boolean replicate(@RequestBody ReplicationRequest request) {
+        service.putInternal(request.getKey(), request.getValue(), request.getTimestamp());
+        return true;
+    }
+
+    // Internal read used by other nodes for quorum reads and read-repair.
+    @GetMapping("/internal/get")
+    public ValueEntry read(@RequestParam String key) {
+        return service.get(key);
     }
 }
