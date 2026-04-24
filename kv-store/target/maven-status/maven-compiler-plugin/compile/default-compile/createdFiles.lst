@@ -1,3 +1,14 @@
-main/java/com/aazim/kvstore/concurrency/LockManager.class
+com/aazim/kvstore/replication/AsyncReplicationStrategy.class
+com/aazim/kvstore/replication/NodeResponse.class
+com/aazim/kvstore/replication/ReplicationStrategyFactory.class
+com/aazim/kvstore/service/KeyValService.class
+com/aazim/kvstore/model/LogEntry.class
+com/aazim/kvstore/scheduler/CompactionService.class
+com/aazim/kvstore/controller/KeyValueController.class
+com/aazim/kvstore/storage/FileLogStore.class
+com/aazim/kvstore/model/ValueEntry.class
+com/aazim/kvstore/storage/LogStore.class
 com/aazim/kvstore/storage/InMemoryStore.class
+com/aazim/kvstore/replication/ReplicationStrategy.class
+com/aazim/kvstore/replication/QuorumReplicationStrategy.class
 com/aazim/kvstore/KvStoreApplication.class

@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import com.aazim.kvstore.service.KeyValService;
 import com.aazim.kvstore.storage.LogStore;
 
+// design hint here. here this service uses two services.
 @Component
 public class CompactionService {
     private final LogStore logStore;

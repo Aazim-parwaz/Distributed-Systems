@@ -15,22 +15,20 @@ import java.util.*;
 
 
 @Component
-public class FileLogStore implements LogStore{
+public class FileLogStore implements LogStore {
 
     @Value("${node.id}")
     private String nodeId;
 
     private File LOG_FILE;
-    private final Object writeLock  = new Object();
+    private final Object writeLock = new Object();
 
 
     @PostConstruct
-    public void init(){
+    public void init() {
         LOG_FILE = new File("kvstore_" + nodeId + ".log");
     }
 
-    
-    
     @Override
     public void append(String key, String value, long timestamp) {
         synchronized (writeLock) {
@@ -47,8 +45,8 @@ public class FileLogStore implements LogStore{
     public List<LogEntry> readAll() {
         List<LogEntry> entries = new ArrayList<>();
 
-        if(!LOG_FILE.exists()){
-            return entries; // No log file, return empty list
+        if (!LOG_FILE.exists()) {
+            return entries;
         }
         try (BufferedReader reader = new BufferedReader(new FileReader(LOG_FILE))) {
             String line;
@@ -69,17 +67,21 @@ public class FileLogStore implements LogStore{
 
     @Override
     public void compact(Map<String, ValueEntry> latestState) {
-        File tempFile = new File("kvstore_temp.log");
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(tempFile))) {
-            for (Map.Entry<String, ValueEntry> entry : latestState.entrySet()) {
-                writer.write(entry.getKey() + "," + entry.getValue().getValue() + "," + entry.getValue().getTimestamp());
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to write compacted log file", e);
-        }
+        // Hold writeLock for the entire operation: if the temp write and the rename
+        // are not atomic with respect to append(), any append that arrives after
+        // the snapshot but before the rename is silently dropped from the log.
+        // On a restart, that write would appear lost even though memory had it.
+        File tempFile = new File("kvstore_" + nodeId + "_temp.log");
         synchronized (writeLock) {
-            if(LOG_FILE.exists() && !LOG_FILE.delete()){
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(tempFile))) {
+                for (Map.Entry<String, ValueEntry> entry : latestState.entrySet()) {
+                    writer.write(entry.getKey() + "," + entry.getValue().getValue() + "," + entry.getValue().getTimestamp());
+                    writer.newLine();
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to write compacted log file", e);
+            }
+            if (LOG_FILE.exists() && !LOG_FILE.delete()) {
                 throw new RuntimeException("Failed to delete old log file during compaction");
             }
             if (!tempFile.renameTo(LOG_FILE)) {
@@ -87,5 +89,4 @@ public class FileLogStore implements LogStore{
             }
         }
     }
-    
 }
