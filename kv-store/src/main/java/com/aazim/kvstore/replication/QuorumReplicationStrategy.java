@@ -8,18 +8,23 @@ import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import com.aazim.kvstore.model.Hint;
 import com.aazim.kvstore.model.ReplicationRequest;
 import com.aazim.kvstore.model.ValueEntry;
+import com.aazim.kvstore.service.KeyValService;
 
 @Component
 public class QuorumReplicationStrategy implements ReplicationStrategy {
 
     private final RestTemplate restTemplate;
     private final WebServerApplicationContext context;
+    private final KeyValService keyValService;
+    private final HintStore hintStore;
 
     @Value("${write.quorum:2}")
     private int writeQuorum;
@@ -29,9 +34,12 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
 
     private String selfNode;
 
-    public QuorumReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context) {
+    public QuorumReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context,
+                                     @Lazy KeyValService keyValService, HintStore hintStore) {
         this.restTemplate = restTemplate;
         this.context = context;
+        this.keyValService = keyValService;
+        this.hintStore = hintStore;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -70,6 +78,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
                 }
             } catch (Exception e) {
                 System.err.println("Failed to replicate to " + node + ": " + e.getMessage());
+                hintStore.store(node, new Hint(key, value, timestamp));
             }
         }
 
@@ -142,16 +151,18 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         for (NodeResponse res : responses) {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
-                // Self-repair goes through /internal/replicate just like any peer —
-                // that endpoint calls putInternal() only, no cascading replication.
-                try {
-                    restTemplate.postForObject(
-                        "http://" + res.getNode() + "/kv/internal/replicate",
-                        new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()),
-                        Boolean.class);
-                    System.out.println("Read repair sent to " + res.getNode());
-                } catch (Exception e) {
-                    System.err.println("Read repair failed for " + res.getNode() + ": " + e.getMessage());
+                if (res.getNode().equals(selfNode)) {
+                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
+                } else {
+                    try {
+                        restTemplate.postForObject(
+                            "http://" + res.getNode() + "/kv/internal/replicate",
+                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()),
+                            Boolean.class);
+                        System.out.println("Read repair sent to " + res.getNode());
+                    } catch (Exception e) {
+                        System.err.println("Read repair failed for " + res.getNode() + ": " + e.getMessage());
+                    }
                 }
             }
         }

@@ -1,5 +1,6 @@
 package com.aazim.kvstore.service;
 
+import com.aazim.kvstore.clock.LamportClock;
 import com.aazim.kvstore.storage.InMemoryStore;
 import com.aazim.kvstore.storage.LogStore;
 import com.aazim.kvstore.model.ValueEntry;
@@ -18,13 +19,16 @@ public class KeyValService {
     private final InMemoryStore store;
     private final LogStore logStore;
     private final ReplicationStrategyFactory strategyFactory;
+    private final LamportClock clock;
 
     private ReplicationStrategy replicationStrategy;
 
-    public KeyValService(InMemoryStore store, LogStore logStore, ReplicationStrategyFactory strategyFactory) {
+    public KeyValService(InMemoryStore store, LogStore logStore,
+                         ReplicationStrategyFactory strategyFactory, LamportClock clock) {
         this.store = store;
         this.logStore = logStore;
         this.strategyFactory = strategyFactory;
+        this.clock = clock;
     }
 
     @PostConstruct
@@ -36,6 +40,7 @@ public class KeyValService {
 
     // Follower write path — timestamp already assigned by coordinator.
     public void putInternal(String key, String value, long ts) {
+        clock.update(ts);  // advance our clock past what we've seen
         ValueEntry existing = store.get(key);
         if (existing == null || ts > existing.getTimestamp()) {
             store.put(key, new ValueEntry(value, ts));
@@ -47,7 +52,7 @@ public class KeyValService {
     // quorum is confirmed. Without this ordering, a failed quorum leaves the
     // coordinator with a committed write no client knows about (split-brain).
     public boolean put(String key, String value) {
-        long ts = System.currentTimeMillis();
+        long ts = clock.tick();
         boolean success = replicationStrategy == null || replicationStrategy.replicate(key, value, ts);
         if (success) {
             store.put(key, new ValueEntry(value, ts));

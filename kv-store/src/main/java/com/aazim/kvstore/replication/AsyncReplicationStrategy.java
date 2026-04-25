@@ -8,28 +8,34 @@ import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import com.aazim.kvstore.model.ReplicationRequest;
 import com.aazim.kvstore.model.ValueEntry;
+import com.aazim.kvstore.service.KeyValService;
 
 @Component
 public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     private final RestTemplate restTemplate;
     private final WebServerApplicationContext context;
+    private final AsyncSender asyncSender;
+    private final KeyValService keyValService;
 
     @Value("${Nodes}")
     private String nodesConfig;
 
     private String selfNode;
 
-    public AsyncReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context) {
+    public AsyncReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context,
+                                    AsyncSender asyncSender, @Lazy KeyValService keyValService) {
         this.restTemplate = restTemplate;
         this.context = context;
+        this.asyncSender = asyncSender;
+        this.keyValService = keyValService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -40,7 +46,7 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     @Override
     public boolean replicate(String key, String value, long timestamp) {
         for (String node : getNodes()) {
-            sendAsync("http://" + node + "/kv/internal/replicate", key, value, timestamp);
+            asyncSender.send(node, new ReplicationRequest(key, value, timestamp));
         }
         return true;
     }
@@ -55,6 +61,13 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public ValueEntry read(String key, ValueEntry localValue) {
+        // Return immediately — async replication prioritises availability over consistency.
+        // Peer comparison and repair happen entirely in the background.
+        CompletableFuture.runAsync(() -> detectAndRepair(key, localValue));
+        return localValue;
+    }
+
+    private void detectAndRepair(String key, ValueEntry localValue) {
         List<NodeResponse> responses = new ArrayList<>();
         responses.add(new NodeResponse(selfNode, localValue));
 
@@ -80,36 +93,29 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
                 .filter(e -> e != null)
                 .toList();
 
-        if (validEntries.isEmpty()) {
-            return localValue;
-        }
+        if (validEntries.isEmpty()) return;
 
         ValueEntry latest = validEntries.stream()
                 .max((a, b) -> Long.compare(a.getTimestamp(), b.getTimestamp()))
-                .orElse(localValue);
+                .orElse(null);
 
-        CompletableFuture.runAsync(() -> repairStaleNodes(key, latest, responses));
-
-        return latest;
+        if (latest != null) {
+            repairStaleNodes(key, latest, responses);
+        }
     }
 
     private void repairStaleNodes(String key, ValueEntry latest, List<NodeResponse> responses) {
         for (NodeResponse res : responses) {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
-                sendAsync("http://" + res.getNode() + "/kv/internal/replicate",
-                          key, latest.getValue(), latest.getTimestamp());
+                if (res.getNode().equals(selfNode)) {
+                    // Skip the HTTP round-trip — we're already on this node.
+                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
+                } else {
+                    asyncSender.send(res.getNode(),
+                                     new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()));
+                }
             }
-        }
-    }
-
-    @Async
-    public void sendAsync(String url, String key, String value, long timestamp) {
-        try {
-            restTemplate.postForObject(url, new ReplicationRequest(key, value, timestamp), Boolean.class);
-            System.out.println("Replicated to " + url + ": " + key + "=" + value);
-        } catch (Exception e) {
-            System.err.println("Failed to replicate to " + url + ": " + e.getMessage());
         }
     }
 }
