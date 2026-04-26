@@ -24,18 +24,24 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     private final WebServerApplicationContext context;
     private final AsyncSender asyncSender;
     private final KeyValService keyValService;
+    private final ConsistentHashRing ring;
 
     @Value("${Nodes}")
     private String nodesConfig;
 
+    @Value("${replication.factor:3}")
+    private int replicationFactor;
+
     private String selfNode;
 
     public AsyncReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context,
-                                    AsyncSender asyncSender, @Lazy KeyValService keyValService) {
+                                    AsyncSender asyncSender, @Lazy KeyValService keyValService,
+                                    ConsistentHashRing ring) {
         this.restTemplate = restTemplate;
         this.context = context;
         this.asyncSender = asyncSender;
         this.keyValService = keyValService;
+        this.ring = ring;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -45,9 +51,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public boolean replicate(String key, String value, long timestamp) {
-        for (String node : getNodes()) {
-            asyncSender.send(node, new ReplicationRequest(key, value, timestamp));
-        }
+        // Replicate only to the preference list peers, not the entire cluster.
+        ring.getPreferenceList(key, replicationFactor).stream()
+            .filter(n -> !n.equals(selfNode))
+            .forEach(node -> asyncSender.send(node, new ReplicationRequest(key, value, timestamp)));
         return true;
     }
 
@@ -61,25 +68,27 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     @Override
     public ValueEntry read(String key, ValueEntry localValue) {
-        // Return immediately — async replication prioritises availability over consistency.
-        // Peer comparison and repair happen entirely in the background.
         CompletableFuture.runAsync(() -> detectAndRepair(key, localValue));
         return localValue;
     }
 
     private void detectAndRepair(String key, ValueEntry localValue) {
+        List<String> preferenceList = ring.getPreferenceList(key, replicationFactor);
         List<NodeResponse> responses = new ArrayList<>();
-        responses.add(new NodeResponse(selfNode, localValue));
+
+        // Only count self if this node owns the key.
+        if (preferenceList.contains(selfNode)) {
+            responses.add(new NodeResponse(selfNode, localValue));
+        }
 
         List<CompletableFuture<NodeResponse>> futures = new ArrayList<>();
-        for (String node : getNodes()) {
+        for (String node : preferenceList.stream().filter(n -> !n.equals(selfNode)).toList()) {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
                     ValueEntry entry = restTemplate.getForObject(
-                        "http://" + node + "/kv/internal/get?key=" + key, ValueEntry.class);
+                            "http://" + node + "/kv/internal/get?key=" + key, ValueEntry.class);
                     return new NodeResponse(node, entry);
                 } catch (Exception e) {
-                    System.err.println("Failed to read from " + node + ": " + e.getMessage());
                     return null;
                 }
             }));
@@ -99,9 +108,7 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
                 .max((a, b) -> Long.compare(a.getTimestamp(), b.getTimestamp()))
                 .orElse(null);
 
-        if (latest != null) {
-            repairStaleNodes(key, latest, responses);
-        }
+        if (latest != null) repairStaleNodes(key, latest, responses);
     }
 
     private void repairStaleNodes(String key, ValueEntry latest, List<NodeResponse> responses) {
@@ -109,11 +116,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
                 if (res.getNode().equals(selfNode)) {
-                    // Skip the HTTP round-trip — we're already on this node.
                     keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
                 } else {
                     asyncSender.send(res.getNode(),
-                                     new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()));
+                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()));
                 }
             }
         }

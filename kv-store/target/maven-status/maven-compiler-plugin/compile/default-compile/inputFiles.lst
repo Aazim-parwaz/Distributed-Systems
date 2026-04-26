@@ -3,6 +3,7 @@
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/NodeResponse.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/FileLogStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/ReplicationRequest.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ConsistentHashRing.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/InMemoryStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/Hint.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/service/KeyValService.java

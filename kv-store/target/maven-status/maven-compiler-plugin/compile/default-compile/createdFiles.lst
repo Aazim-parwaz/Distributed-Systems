@@ -5,6 +5,7 @@ com/aazim/kvstore/storage/InMemoryStore.class
 com/aazim/kvstore/replication/AsyncSender.class
 com/aazim/kvstore/model/Hint.class
 com/aazim/kvstore/KvStoreApplication.class
+com/aazim/kvstore/replication/ConsistentHashRing.class
 com/aazim/kvstore/clock/LamportClock.class
 com/aazim/kvstore/replication/AsyncReplicationStrategy.class
 com/aazim/kvstore/replication/NodeResponse.class

@@ -25,9 +25,11 @@ public class HintStore {
     private static final int MAX_HINTS_PER_NODE = 500;
     private static final long MAX_HINT_AGE_MS   = 3_600_000; // 1 hour
 
+    // node -> pending hints for that node
     private final ConcurrentHashMap<String, ConcurrentLinkedQueue<Hint>> pending = new ConcurrentHashMap<>();
 
     public void store(String node, Hint hint) {
+        // Enforce a max pending hint count per node to prevent unbounded memory growth.
         ConcurrentLinkedQueue<Hint> queue = pending.computeIfAbsent(node, k -> new ConcurrentLinkedQueue<>());
         if (queue.size() >= MAX_HINTS_PER_NODE) {
             log.warn("Queue full for {}, dropping hint for key={}", node, hint.getKey());
