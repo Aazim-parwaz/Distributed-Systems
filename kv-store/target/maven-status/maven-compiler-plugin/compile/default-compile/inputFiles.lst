@@ -1,8 +1,11 @@
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/HintStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/config/AppConfig.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/NodeResponse.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/FileLogStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/ReplicationRequest.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ConsistentHashRing.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/InMemoryStore.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/Hint.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/service/KeyValService.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/AsyncReplicationStrategy.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/ValueEntry.java
@@ -10,7 +13,10 @@
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/LogStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/scheduler/CompactionService.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationStrategy.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/AsyncSender.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/controller/KeyValueController.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/QuorumReplicationStrategy.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationStrategyFactory.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/clock/LamportClock.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/HintedHandoffService.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/KvStoreApplication.java
