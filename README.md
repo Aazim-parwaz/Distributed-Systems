@@ -99,7 +99,7 @@ This is primarily a personal learning repo, but suggestions, discussions, and im
 
 ## ⭐ Why This Repo?
 
-If you're preparing for backend or distributed systems roles, this repo demonstrates:
+This repo demonstrates:
 
 * Ability to design scalable systems
 * Strong fundamentals in distributed computing
