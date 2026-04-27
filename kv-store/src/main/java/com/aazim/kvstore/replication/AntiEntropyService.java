@@ -28,17 +28,22 @@ public class AntiEntropyService {
 
     private final RestTemplate restTemplate;
     private final KeyValService keyValService;
+    private final ConsistentHashRing ring;
     private final WebServerApplicationContext context;
 
     @Value("${Nodes}")
     private String nodesConfig;
 
+    @Value("${replication.factor:3}")
+    private int replicationFactor;
+
     private String selfNode;
 
     public AntiEntropyService(RestTemplate restTemplate, @Lazy KeyValService keyValService,
-                              WebServerApplicationContext context) {
+                              ConsistentHashRing ring, WebServerApplicationContext context) {
         this.restTemplate = restTemplate;
         this.keyValService = keyValService;
+        this.ring = ring;
         this.context = context;
     }
 
@@ -111,6 +116,8 @@ public class AntiEntropyService {
         Map<String, ValueEntry> localEntries = localTree.getBucketEntries(bucketIndex);
 
         for (Map.Entry<String, ValueEntry> e : peerEntries.entrySet()) {
+            // Only pull keys this node is supposed to own.
+            if (!ring.getPreferenceList(e.getKey(), replicationFactor).contains(selfNode)) continue;
             ValueEntry local = localEntries.get(e.getKey());
             if (local == null || e.getValue().getTimestamp() > local.getTimestamp()) {
                 keyValService.putInternal(e.getKey(), e.getValue().getValue(), e.getValue().getTimestamp());
@@ -119,6 +126,8 @@ public class AntiEntropyService {
         }
 
         for (Map.Entry<String, ValueEntry> e : localEntries.entrySet()) {
+            // Only push keys the peer is supposed to own.
+            if (!ring.getPreferenceList(e.getKey(), replicationFactor).contains(peer)) continue;
             ValueEntry peerVal = peerEntries.get(e.getKey());
             if (peerVal == null || e.getValue().getTimestamp() > peerVal.getTimestamp()) {
                 try {
