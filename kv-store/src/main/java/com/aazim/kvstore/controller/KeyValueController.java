@@ -6,6 +6,7 @@ import java.util.Map;
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.replication.ConsistentHashRing;
 import com.aazim.kvstore.replication.HintStore;
+import com.aazim.kvstore.replication.MerkleTree;
 import com.aazim.kvstore.service.KeyValService;
 
 import org.apache.catalina.connector.Response;
@@ -70,5 +71,17 @@ public class KeyValueController {
     @GetMapping("/ring")
     public List<String> ring(@RequestParam String key) {
         return ring.getPreferenceList(key, replicationFactor);
+    }
+
+    // Anti-entropy: return the hash at a given node index in this node's Merkle tree.
+    @GetMapping("/internal/merkle/hash/{nodeIndex}")
+    public String merkleHash(@PathVariable int nodeIndex) {
+        return new MerkleTree(service.getAll()).getHash(nodeIndex);
+    }
+
+    // Anti-entropy: return all key-value entries in the given bucket.
+    @GetMapping("/internal/merkle/bucket/{bucketIndex}")
+    public Map<String, ValueEntry> merkleBucket(@PathVariable int bucketIndex) {
+        return new MerkleTree(service.getAll()).getBucketEntries(bucketIndex);
     }
 }

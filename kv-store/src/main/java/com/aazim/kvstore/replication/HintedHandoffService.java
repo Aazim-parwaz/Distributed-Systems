@@ -26,7 +26,7 @@ public class HintedHandoffService {
         this.restTemplate = restTemplate;
     }
 
-    @Scheduled(fixedDelay = 5000)
+    @Scheduled(fixedDelay = 5000) // Run every 5 seconds to check if node is up and deliver hints
     public void deliverPendingHints() {
         Set<String> nodes = hintStore.nodesWithHints();
         if (!nodes.isEmpty()) {

@@ -141,7 +141,8 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
                 .map(f -> f.getNow(null))
                 .filter(r -> r != null)
                 .toList();
-
+        
+        // Quorum checked on response size not the valueEntry count because some nodes might be down or unresponsive, and we want to ensure we have enough responses to make a decision even if some are null.
         if (responses.size() < readQuorum) {
             throw new RuntimeException("Read quorum not met: " + responses.size() + "/" + readQuorum
                                        + " for key=" + key);
