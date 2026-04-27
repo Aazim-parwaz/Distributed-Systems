@@ -80,7 +80,7 @@ public class KeyValService {
     }
 
     private boolean isOwner(String key) {
-        if (selfNode == null) return true; // startup safety: context not ready yet
+        if (selfNode == null) return true; // startup safety: context not ready yet // temporary inconsistency window where we might accept some writes that should be rejected, but better than losing data by rejecting all writes until ready.
         return ring.getPreferenceList(key, replicationFactor).contains(selfNode);
     }
 

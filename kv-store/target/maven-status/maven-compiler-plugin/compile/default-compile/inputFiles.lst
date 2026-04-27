@@ -4,6 +4,7 @@
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/FileLogStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/ReplicationRequest.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ConsistentHashRing.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/AntiEntropyService.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/storage/InMemoryStore.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/model/Hint.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/service/KeyValService.java
@@ -15,6 +16,7 @@
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationStrategy.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/AsyncSender.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/controller/KeyValueController.java
+/Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/MerkleTree.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/QuorumReplicationStrategy.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/replication/ReplicationStrategyFactory.java
 /Users/aazimparwaz/Projects/Distributed-Systems/kv-store/src/main/java/com/aazim/kvstore/clock/LamportClock.java
