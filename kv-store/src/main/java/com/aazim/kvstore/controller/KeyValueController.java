@@ -3,8 +3,10 @@ package com.aazim.kvstore.controller;
 import java.util.List;
 import java.util.Map;
 
+import com.aazim.kvstore.model.MemberInfo;
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.replication.ConsistentHashRing;
+import com.aazim.kvstore.replication.GossipService;
 import com.aazim.kvstore.replication.HintStore;
 import com.aazim.kvstore.replication.MerkleTree;
 import com.aazim.kvstore.service.KeyValService;
@@ -22,14 +24,17 @@ public class KeyValueController {
     private final KeyValService service;
     private final HintStore hintStore;
     private final ConsistentHashRing ring;
+    private final GossipService gossipService;
 
     @Value("${replication.factor:3}")
     private int replicationFactor;
 
-    public KeyValueController(KeyValService service, HintStore hintStore, ConsistentHashRing ring) {
+    public KeyValueController(KeyValService service, HintStore hintStore,
+                              ConsistentHashRing ring, GossipService gossipService) {
         this.service = service;
         this.hintStore = hintStore;
         this.ring = ring;
+        this.gossipService = gossipService;
     }
 
     @PutMapping("/put")
@@ -90,5 +95,17 @@ public class KeyValueController {
     @GetMapping("/internal/merkle/hash/{nodeIndex}")
     public String merkleHash(@PathVariable int nodeIndex) {
         return new MerkleTree(service.getAll()).getHash(nodeIndex);
+    }
+
+    // Gossip: receive a peer's membership table, merge it, return ours.
+    @PostMapping("/internal/gossip")
+    public Map<String, MemberInfo> gossip(@RequestBody Map<String, MemberInfo> incoming) {
+        return gossipService.merge(incoming);
+    }
+
+    // Debug: current membership view as seen by this node.
+    @GetMapping("/members")
+    public Map<String, MemberInfo> members() {
+        return gossipService.getMembers();
     }
 }

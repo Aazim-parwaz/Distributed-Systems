@@ -1,6 +1,6 @@
 # Distributed Key-Value Store
 
-A Dynamo-style distributed key-value store built from scratch in Java (Spring Boot). Implements consistent hashing, quorum-based replication, read repair, hinted handoff, anti-entropy via Merkle trees, and a Lamport clock for conflict resolution — all without any external coordination service.
+A Dynamo-style distributed key-value store built from scratch in Java (Spring Boot). Implements consistent hashing, quorum-based replication, read repair, hinted handoff, anti-entropy via Merkle trees, gossip-based membership with failure detection, and a Lamport clock for conflict resolution — all without any external coordination service.
 
 ---
 
@@ -14,6 +14,7 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 | Read repair | Stale replicas are healed automatically on every read |
 | Hinted handoff | Writes to down nodes are buffered and replayed when the node recovers |
 | Anti-entropy | Merkle tree comparison between peers proactively finds and repairs all divergence |
+| Gossip membership | Nodes discover each other and detect failures via infection-style gossip; dead nodes are removed from the ring automatically |
 | WAL persistence | Every write is appended to a per-node log file; full state recovers on restart |
 | Log compaction | WAL is compacted every 60 seconds, keeping only the latest value per key |
 
@@ -62,6 +63,15 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 |  |  - Compares root hash with each peer                   | |
 |  |  - Walks tree top-down to find diverged buckets        | |
 |  |  - Bidirectional sync respecting ring ownership        | |
+|  +--------------------------------------------------------+ |
+|                                                             |
+|  +--------------------------------------------------------+ |
+|  |              GossipService (background)                | |
+|  |  - Every 1s: increment heartbeat, detect failures      | |
+|  |  - Push full membership table to 3 random live peers   | |
+|  |  - Merge rule: higher heartbeat wins, lastSeen local   | |
+|  |  - ALIVE --> SUSPECT (5s) --> DEAD (10s) + ring.remove | |
+|  |  - Recovery: DEAD --> ALIVE on heartbeat advance       | |
 |  +--------------------------------------------------------+ |
 +--------------------------------------------------------------+
 ```
@@ -156,6 +166,33 @@ Both mechanisms repair diverged nodes, but they are complementary — neither re
 
 ---
 
+## Gossip-Based Membership
+
+Each node maintains a local membership table (`ConcurrentHashMap<String, MemberInfo>`) tracking the state of every known peer. Every gossip round (default 1 second):
+
+1. Increment own heartbeat counter.
+2. Run failure detection — advance peers through `ALIVE → SUSPECT → DEAD` based on elapsed time since last heartbeat.
+3. Pick up to 3 random live peers and `POST /internal/gossip` with the full local table. Merge the peer's response.
+
+When a node is declared `DEAD` it is removed from the consistent hash ring immediately. When it recovers and resumes sending heartbeats, it is re-added to the ring and anti-entropy syncs any data it missed.
+
+### Failure detection
+
+```
+elapsed = now - lastSeen  (measured with System.nanoTime(), never wall clock)
+
+elapsed > 5s  AND state == ALIVE   -->  SUSPECT
+elapsed > 10s AND state != DEAD    -->  DEAD  +  ring.removeNode()
+```
+
+`lastSeen` is reset to the receiver's local monotonic clock on every merge — it is never propagated in gossip messages. This prevents stale timestamps from remote nodes corrupting local timeout decisions.
+
+### Merge rule
+
+For each entry in an incoming membership table: if the incoming heartbeat counter is higher than the local one, the node is reachable — update state to `ALIVE` and reset `lastSeen`. If the incoming heartbeat is equal or lower, discard it as stale.
+
+---
+
 ## Request Flow
 
 ### Write
@@ -215,10 +252,10 @@ Node 8081 goes down
 [every anti.entropy.delay.ms]
         |
         +-- Build local Merkle tree from store snapshot
-        +-- For each peer:
-             +-- GET /internal/merkle/hash/0  (root)
-             +-- Hashes match? --> skip (entire keyspace in sync)
-             +-- Differ? --> recurse into left/right subtrees
+        +-- For each live peer (from gossip membership):
+             +-- GET /internal/merkle/tree  (fetch all 31 hashes in one call)
+             +-- Compare locally top-down:
+                  +-- Hashes match at node? --> skip subtree
                   +-- Leaf bucket differs?
                        +-- GET /internal/merkle/bucket/{n}  (fetch peer's entries)
                        +-- Pull: peer newer + this node owns key --> putInternal()
@@ -248,7 +285,10 @@ Node 8081 goes down
 replication.mode=async          # async | quorum
 replication.factor=3            # number of nodes that own each key
 write.quorum=2                  # minimum ACKs required (quorum mode)
-anti.entropy.delay.ms=30000     # how often anti-entropy runs (ms)
+anti.entropy.delay.ms=50000     # how often anti-entropy runs (ms)
+gossip.interval.ms=1000         # gossip round interval
+gossip.suspect.timeout.ms=5000  # ms without heartbeat before SUSPECT
+gossip.dead.timeout.ms=10000    # ms without heartbeat before DEAD
 Nodes=localhost:8080,localhost:8081,localhost:8082,localhost:8083
 ```
 
@@ -296,6 +336,7 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 |---|---|---|
 | `GET` | `/kv/ring?key=` | Show preference list for a key |
 | `GET` | `/kv/hints` | Show pending hint counts per down node |
+| `GET` | `/kv/members` | Show current membership table (address, state, heartbeat) |
 
 ### Internal endpoints (node-to-node only)
 
@@ -303,8 +344,10 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 |---|---|---|
 | `POST` | `/kv/internal/replicate` | Follower write (timestamp already assigned by coordinator) |
 | `GET` | `/kv/internal/get?key=` | Raw local read used for quorum reads and read repair |
+| `GET` | `/kv/internal/merkle/tree` | All 31 Merkle tree hashes in a single response |
 | `GET` | `/kv/internal/merkle/hash/{nodeIndex}` | Merkle tree hash at given node index (root = 0) |
 | `GET` | `/kv/internal/merkle/bucket/{bucketIndex}` | All key-value entries in a Merkle bucket (0–15) |
+| `POST` | `/kv/internal/gossip` | Receive a peer's membership table; merge and return local table |
 
 ---
 
@@ -360,6 +403,24 @@ curl "http://localhost:8081/kv/internal/get?key=orphan"
 curl "http://localhost:8082/kv/get?key=x"
 ```
 
+### Gossip and failure detection
+```bash
+# 1. Check membership table on any node
+curl "http://localhost:8080/kv/members"
+# All 4 nodes should appear as ALIVE
+
+# 2. Kill node 8081 (Ctrl-C or kill the process)
+# 3. After 5 seconds, 8081 transitions to SUSPECT on surviving nodes
+# 4. After 10 seconds, 8081 transitions to DEAD and is removed from the ring
+curl "http://localhost:8080/kv/members"
+# localhost:8081 shows state: DEAD
+
+# 5. Restart 8081
+# 6. Within one gossip round (1s), 8081 re-appears as ALIVE
+curl "http://localhost:8080/kv/members"
+# localhost:8081 shows state: ALIVE
+```
+
 ---
 
 ## Project Structure
@@ -375,6 +436,8 @@ src/main/java/com/aazim/kvstore/
 ├── model/
 │   ├── Hint.java                        Pending write for a down node
 │   ├── LogEntry.java                    WAL record
+│   ├── MemberInfo.java                  Gossip membership entry (address, state, heartbeat, lastSeen)
+│   ├── NodeState.java                   Membership state enum (ALIVE, SUSPECT, DEAD)
 │   ├── ReplicationRequest.java          Inter-node write payload
 │   └── ValueEntry.java                  Value + Lamport timestamp
 ├── replication/
@@ -382,6 +445,7 @@ src/main/java/com/aazim/kvstore/
 │   ├── AsyncReplicationStrategy.java    Fire-and-forget replication
 │   ├── AsyncSender.java                 @Async HTTP sender with hint fallback
 │   ├── ConsistentHashRing.java          Virtual-node ring, preference lists
+│   ├── GossipService.java               Gossip membership, failure detection, ring integration
 │   ├── HintStore.java                   In-memory hint buffer per node
 │   ├── HintedHandoffService.java        Scheduled hint delivery (every 5s)
 │   ├── MerkleTree.java                  16-bucket SHA-256 Merkle tree
@@ -413,6 +477,7 @@ src/main/java/com/aazim/kvstore/
 
 ## What's Not Implemented Yet
 
-- **Gossip protocol** — membership is static config; nodes cannot discover each other or detect failures without polling; `addNode`/`removeNode` on the ring exist but are not wired to any membership event
 - **Tombstones for deletes** — there is no delete operation; a deleted key must be overwritten; a node that missed the deletion will re-introduce the value during read repair or anti-entropy
 - **Request routing** — a non-owner coordinator in async mode may return `null` for keys it does not hold locally; proper routing would transparently forward to a preference list node
+- **Phi-accrual failure detector** — gossip uses fixed suspect/dead timeouts; a phi-accrual detector would adapt thresholds based on observed inter-arrival times, reducing false positives under variable load
+- **Delta gossip** — each gossip round sends the full membership table; in large clusters this should be limited to entries whose heartbeat changed since the last round

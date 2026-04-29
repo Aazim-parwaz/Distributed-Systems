@@ -17,7 +17,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -29,10 +28,8 @@ public class AntiEntropyService {
     private final RestTemplate restTemplate;
     private final KeyValService keyValService;
     private final ConsistentHashRing ring;
+    private final GossipService gossipService;
     private final WebServerApplicationContext context;
-
-    @Value("${Nodes}")
-    private String nodesConfig;
 
     @Value("${replication.factor:3}")
     private int replicationFactor;
@@ -40,10 +37,12 @@ public class AntiEntropyService {
     private String selfNode;
 
     public AntiEntropyService(RestTemplate restTemplate, @Lazy KeyValService keyValService,
-                              ConsistentHashRing ring, WebServerApplicationContext context) {
+                              ConsistentHashRing ring, GossipService gossipService,
+                              WebServerApplicationContext context) {
         this.restTemplate = restTemplate;
         this.keyValService = keyValService;
         this.ring = ring;
+        this.gossipService = gossipService;
         this.context = context;
     }
 
@@ -56,8 +55,7 @@ public class AntiEntropyService {
     public void runAntiEntropy() {
         if (selfNode == null) return;
 
-        List<String> peers = Arrays.stream(nodesConfig.split(","))
-                .map(String::trim)
+        List<String> peers = gossipService.getLiveMembers().stream()
                 .filter(n -> !n.equals(selfNode))
                 .toList();
 
