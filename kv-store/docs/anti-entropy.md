@@ -10,7 +10,7 @@ Runs as a background scheduler on every node. Periodically compares the full loc
 
 ### Merkle Tree Structure
 
-- 16 leaf buckets. Keys distributed by `Math.abs(key.hashCode()) % 16`.
+- 16 leaf buckets. Keys distributed by taking the first 4 bytes of the key's SHA-256 hash as an unsigned 32-bit integer, then `% 16`. SHA-256 gives near-uniform distribution regardless of key naming patterns.
 - Each leaf hashes its sorted `key:value:timestamp` pairs with SHA-256.
 - Internal nodes hash their two children bottom-up.
 - Full tree has 31 nodes in a flat array (root at index 0).
@@ -68,8 +68,9 @@ Each stale key in a diverged bucket produces a separate `POST /internal/replicat
 ## Future Improvements
 
 ### Short term
+- **Increase bucket count**: 16 buckets means on average keys/16 keys per bucket. A busy store with 160k keys has ~10k keys per bucket — one diverged bucket causes a large data transfer. Increasing to 256 or 1024 buckets makes diffs more surgical at the cost of a deeper tree (more hash requests per round, mitigated by the single-tree-fetch improvement below).
 - **Cache the Merkle tree server-side** with a short TTL (e.g. 5s). All requests within one round hit the same snapshot. Fixes both the rebuild cost and the snapshot consistency issue.
-- **Single endpoint returning all 31 hashes** (`GET /merkle/tree`). Reduces the hash-comparison phase from up to 31 requests to 1.
+- **Single endpoint returning all 31 hashes** — implemented. `GET /merkle/tree` returns all 31 hashes in one call. The initiator diffs both trees locally in `findDivergedBuckets` and only makes HTTP calls for diverged buckets.
 - **Batch push endpoint** (`POST /internal/replicate/batch` accepting `List<ReplicationRequest>`). One call per diverged bucket instead of one per key.
 
 ### Medium term

@@ -73,15 +73,22 @@ public class KeyValueController {
         return ring.getPreferenceList(key, replicationFactor);
     }
 
-    // Anti-entropy: return the hash at a given node index in this node's Merkle tree.
-    @GetMapping("/internal/merkle/hash/{nodeIndex}")
-    public String merkleHash(@PathVariable int nodeIndex) {
-        return new MerkleTree(service.getAll()).getHash(nodeIndex);
+    // Anti-entropy: return all 2*BUCKET_COUNT-1 hashes in one shot so the
+    // initiator can diff the entire tree locally without further round-trips.
+    @GetMapping("/internal/merkle/tree")
+    public String[] merkleTree() {
+        return new MerkleTree(service.getAll()).getAllHashes();
     }
 
     // Anti-entropy: return all key-value entries in the given bucket.
     @GetMapping("/internal/merkle/bucket/{bucketIndex}")
     public Map<String, ValueEntry> merkleBucket(@PathVariable int bucketIndex) {
         return new MerkleTree(service.getAll()).getBucketEntries(bucketIndex);
+    }
+
+    // Debug: hash at a specific node index (kept for manual inspection).
+    @GetMapping("/internal/merkle/hash/{nodeIndex}")
+    public String merkleHash(@PathVariable int nodeIndex) {
+        return new MerkleTree(service.getAll()).getHash(nodeIndex);
     }
 }
