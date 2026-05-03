@@ -1,6 +1,6 @@
 # Distributed Key-Value Store
 
-A Dynamo-style distributed key-value store built from scratch in Java (Spring Boot). Implements consistent hashing, quorum-based replication, read repair, hinted handoff, anti-entropy via Merkle trees, and a Lamport clock for conflict resolution — all without any external coordination service.
+A Dynamo-style distributed key-value store built from scratch in Java (Spring Boot). Implements consistent hashing, quorum-based replication, read repair, hinted handoff, anti-entropy via Merkle trees, gossip-based membership with failure detection, and a Lamport clock for conflict resolution — all without any external coordination service.
 
 ---
 
@@ -14,6 +14,7 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 | Read repair | Stale replicas are healed automatically on every read |
 | Hinted handoff | Writes to down nodes are buffered and replayed when the node recovers |
 | Anti-entropy | Merkle tree comparison between peers proactively finds and repairs all divergence |
+| Gossip membership | Nodes discover each other and detect failures via infection-style gossip; dead nodes are removed from the ring automatically; incarnation numbers fix the resurrection bug; indirect probing reduces false positives |
 | WAL persistence | Every write is appended to a per-node log file; full state recovers on restart |
 | Log compaction | WAL is compacted every 60 seconds, keeping only the latest value per key |
 
@@ -62,6 +63,15 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 |  |  - Compares root hash with each peer                   | |
 |  |  - Walks tree top-down to find diverged buckets        | |
 |  |  - Bidirectional sync respecting ring ownership        | |
+|  +--------------------------------------------------------+ |
+|                                                             |
+|  +--------------------------------------------------------+ |
+|  |              GossipService (background)                | |
+|  |  - Every 1s: increment heartbeat, detect failures      | |
+|  |  - Push full membership table to 3 random live peers   | |
+|  |  - Merge rule: (incarnation, heartbeat) wins, lastSeen local| |
+|  |  - ALIVE → SUSPECT (5s) → indirect probe → DEAD (10s) | |
+|  |  - Recovery: DEAD → ALIVE via incarnation number bump  | |
 |  +--------------------------------------------------------+ |
 +--------------------------------------------------------------+
 ```
@@ -156,6 +166,44 @@ Both mechanisms repair diverged nodes, but they are complementary — neither re
 
 ---
 
+## Gossip-Based Membership
+
+Each node maintains a local membership table (`ConcurrentHashMap<String, MemberInfo>`) tracking the state of every known peer. Every gossip round (default 1 second):
+
+1. Increment own heartbeat counter.
+2. Run failure detection — advance peers through `ALIVE → SUSPECT → DEAD` based on elapsed time since last heartbeat, with indirect probing before the final transition.
+3. Pick up to 3 random live peers and `POST /internal/gossip` with the full local table. Merge the peer's response.
+
+When a node is declared `DEAD` it is removed from the consistent hash ring immediately. When it recovers, gossip detects the higher incarnation number and re-adds it to the ring. Anti-entropy then syncs any data it missed while it was down.
+
+### Failure detection
+
+```
+elapsed = now - lastSeen  (measured with System.nanoTime(), never wall clock)
+
+elapsed > 5s  AND state == ALIVE   →  SUSPECT
+elapsed > 10s AND state != DEAD    →  ask 2 random live peers to probe the suspect
+                                       any probe succeeds? → reset to ALIVE
+                                       all probes fail?    → DEAD + ring.removeNode()
+```
+
+`lastSeen` is reset to the receiver's local monotonic clock on every merge — it is never propagated in gossip messages. This prevents stale timestamps from remote nodes corrupting local timeout decisions.
+
+Indirect probing distinguishes a truly dead node from one that is briefly unreachable from us but still reachable from the rest of the cluster (asymmetric network, transient GC pause). Only if all probers confirm the node is unreachable is it declared dead.
+
+### Merge rule
+
+The merge key is `(incarnation, heartbeat)`:
+
+- `recv.incarnation < existing.incarnation` — stale info from a previous run of that node, discard.
+- `recv.incarnation > existing.incarnation` — node restarted; always wins regardless of heartbeat. Triggers `DEAD → ALIVE` recovery and `ring.addNode()`.
+- same incarnation, `recv.heartbeat > existing.heartbeat` — heartbeat advanced; node is reachable, update to `ALIVE`.
+- same incarnation, `recv.heartbeat <= existing.heartbeat` — stale or duplicate, discard.
+
+Incarnation numbers are persisted to `incarnation_<nodeId>.dat` and incremented on every restart. This fixes the resurrection bug: a restarted node whose heartbeat resets to 0 would previously be ignored forever because the cluster held a higher heartbeat from the dead entry.
+
+---
+
 ## Request Flow
 
 ### Write
@@ -215,10 +263,10 @@ Node 8081 goes down
 [every anti.entropy.delay.ms]
         |
         +-- Build local Merkle tree from store snapshot
-        +-- For each peer:
-             +-- GET /internal/merkle/hash/0  (root)
-             +-- Hashes match? --> skip (entire keyspace in sync)
-             +-- Differ? --> recurse into left/right subtrees
+        +-- For each live peer (from gossip membership):
+             +-- GET /internal/merkle/tree  (fetch all 31 hashes in one call)
+             +-- Compare locally top-down:
+                  +-- Hashes match at node? --> skip subtree
                   +-- Leaf bucket differs?
                        +-- GET /internal/merkle/bucket/{n}  (fetch peer's entries)
                        +-- Pull: peer newer + this node owns key --> putInternal()
@@ -248,7 +296,10 @@ Node 8081 goes down
 replication.mode=async          # async | quorum
 replication.factor=3            # number of nodes that own each key
 write.quorum=2                  # minimum ACKs required (quorum mode)
-anti.entropy.delay.ms=30000     # how often anti-entropy runs (ms)
+anti.entropy.delay.ms=50000     # how often anti-entropy runs (ms)
+gossip.interval.ms=1000         # gossip round interval
+gossip.suspect.timeout.ms=5000  # ms without heartbeat before SUSPECT
+gossip.dead.timeout.ms=10000    # ms without heartbeat before DEAD
 Nodes=localhost:8080,localhost:8081,localhost:8082,localhost:8083
 ```
 
@@ -296,6 +347,7 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 |---|---|---|
 | `GET` | `/kv/ring?key=` | Show preference list for a key |
 | `GET` | `/kv/hints` | Show pending hint counts per down node |
+| `GET` | `/kv/members` | Show current membership table (address, state, heartbeat) |
 
 ### Internal endpoints (node-to-node only)
 
@@ -303,61 +355,296 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 |---|---|---|
 | `POST` | `/kv/internal/replicate` | Follower write (timestamp already assigned by coordinator) |
 | `GET` | `/kv/internal/get?key=` | Raw local read used for quorum reads and read repair |
+| `GET` | `/kv/internal/merkle/tree` | All 31 Merkle tree hashes in a single response |
 | `GET` | `/kv/internal/merkle/hash/{nodeIndex}` | Merkle tree hash at given node index (root = 0) |
 | `GET` | `/kv/internal/merkle/bucket/{bucketIndex}` | All key-value entries in a Merkle bucket (0–15) |
+| `POST` | `/kv/internal/gossip` | Receive a peer's membership table; merge and return local table |
+| `POST` | `/kv/internal/probe?target=` | Indirect probe: check if this node can reach `target`; used before declaring a node dead |
 
 ---
 
-## Testing Scenarios
+## Testing Each Service
 
-### Basic write and read
+Start a 4-node cluster first — open four terminal tabs and run one per tab:
+
 ```bash
-curl -X PUT "http://localhost:8080/kv/put?key=name&value=alice"
-curl "http://localhost:8081/kv/get?key=name"
+# Tab 1
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8080
+# Tab 2
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8081
+# Tab 3
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8082
+# Tab 4
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 ```
 
-### Verify key ownership
+---
+
+### 1. Basic reads and writes (`KeyValueController`)
+
 ```bash
+# Write via any coordinator
+curl -X PUT "http://localhost:8080/kv/put?key=name&value=alice"
+# SUCCESS
+
+# Read from a different node — replication should have delivered it
+curl "http://localhost:8081/kv/get?key=name"
+# alice
+```
+
+---
+
+### 2. Consistent hashing (`ConsistentHashRing`)
+
+```bash
+# See which 3 nodes own a key
 curl "http://localhost:8080/kv/ring?key=name"
 # e.g. ["localhost:8082","localhost:8080","localhost:8081"]
+
+# The 4th node is NOT in the list and should return 404 for that key
+# (find the node that is not in the preference list above and query it directly)
+curl "http://localhost:8083/kv/internal/get?key=name"
+# null (not found — 8083 is not an owner of "name")
+
+# Different keys land on different owners
+curl "http://localhost:8080/kv/ring?key=foo"
+curl "http://localhost:8080/kv/ring?key=bar"
+# Expect different node orderings
 ```
 
-### Hinted handoff
+---
+
+### 3. Replication modes (`AsyncReplicationStrategy` / `QuorumReplicationStrategy`)
+
+#### Async (default)
+
 ```bash
-# 1. Stop node 8081
-# 2. Write via 8080
-curl -X PUT "http://localhost:8080/kv/put?key=x&value=100"
-# 3. Check hints buffered on coordinator
+# Write returns immediately without waiting for replicas
+curl -X PUT "http://localhost:8080/kv/put?key=async_test&value=1"
+# SUCCESS — returned before peer ACKs
+
+# Read from another owner — may briefly return stale or null before replication completes
+curl "http://localhost:8081/kv/get?key=async_test"
+```
+
+#### Quorum
+
+Set `replication.mode=quorum` in `application.properties`, rebuild, and restart:
+
+```bash
+# Write blocks until W=2 nodes ACK
+curl -X PUT "http://localhost:8080/kv/put?key=quorum_test&value=1"
+
+# Stop one non-coordinator owner (e.g. 8081) — write still succeeds (W=2, need 1 more ACK)
+# Stop two owners — write should fail (cannot reach quorum)
+```
+
+---
+
+### 4. Hinted handoff (`HintStore` / `HintedHandoffService`)
+
+```bash
+# 1. Find the preference list for key "hh"
+curl "http://localhost:8080/kv/ring?key=hh"
+# e.g. ["localhost:8081","localhost:8082","localhost:8080"]
+
+# 2. Kill 8081 (Ctrl-C in its tab)
+
+# 3. Write via a node that IS up (coordinator will try 8081, fail, store a hint)
+curl -X PUT "http://localhost:8080/kv/put?key=hh&value=buffered"
+
+# 4. Confirm hint is buffered on the coordinator
 curl "http://localhost:8080/kv/hints"
 # {"localhost:8081": 1}
 
-# 4. Restart node 8081 — within 5 seconds hints are delivered
-curl "http://localhost:8081/kv/get?key=x"
-# 100
+# 5. Restart 8081 — HintedHandoffService retries every 5 seconds
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8081
+
+# 6. After ≤5s, hint is delivered and hints count drops to 0
+curl "http://localhost:8080/kv/hints"
+# {}
+
+# 7. Confirm 8081 has the key
+curl "http://localhost:8081/kv/get?key=hh"
+# buffered
 ```
 
-### Anti-entropy (simulate orphaned write)
+---
+
+### 5. Anti-entropy (`AntiEntropyService` / `MerkleTree`)
+
+Anti-entropy repairs divergence that hinted handoff would never know about (e.g. a partial quorum write, or a node that was down when a coordinator crashed before delivering hints).
+
 ```bash
-# 1. Inject a key directly to one node only, bypassing replication
+# 1. Inject a key directly into one node only — bypasses replication entirely
 curl -X POST "http://localhost:8080/kv/internal/replicate" \
   -H "Content-Type: application/json" \
-  -d '{"key":"orphan","value":"val","timestamp":1000}'
+  -d '{"key":"orphan","value":"only-on-8080","timestamp":9999}'
 
-# 2. Confirm divergence via Merkle root
-curl "http://localhost:8080/kv/internal/merkle/hash/0"   # differs
-curl "http://localhost:8081/kv/internal/merkle/hash/0"   # differs
-
-# 3. Wait one anti-entropy cycle (anti.entropy.delay.ms)
-# 4. All owners of "orphan" now have it
+# 2. Confirm 8081 does not have it yet
 curl "http://localhost:8081/kv/internal/get?key=orphan"
+# null
+
+# 3. Check that the Merkle root hashes differ between 8080 and 8081
+curl "http://localhost:8080/kv/internal/merkle/hash/0"
+curl "http://localhost:8081/kv/internal/merkle/hash/0"
+# Different values — divergence confirmed
+
+# 4. Wait one anti-entropy cycle (anti.entropy.delay.ms, default 50000ms)
+#    Speed this up by temporarily lowering anti.entropy.delay.ms=5000 in config
+
+# 5. After the cycle, all owners have the key
+curl "http://localhost:8081/kv/internal/get?key=orphan"
+# {"value":"only-on-8080","timestamp":9999}
+
+# 6. Roots should now match
+curl "http://localhost:8080/kv/internal/merkle/hash/0"
+curl "http://localhost:8081/kv/internal/merkle/hash/0"
+# Same value
 ```
 
-### Read repair
+**Inspect the full Merkle tree (31 nodes for a 16-bucket tree):**
+
 ```bash
-# Write via 8080, then read via 8082
-# Quorum read queries all preference list nodes, picks the latest,
-# and silently repairs any stale replica in the background
-curl "http://localhost:8082/kv/get?key=x"
+curl "http://localhost:8080/kv/internal/merkle/tree"
+# ["<root-hash>", "<left-child>", "<right-child>", ...]
+
+# Fetch all entries in a specific bucket (0–15)
+curl "http://localhost:8080/kv/internal/merkle/bucket/3"
+```
+
+---
+
+### 6. Read repair (`KeyValService` / `QuorumReplicationStrategy`)
+
+Read repair silently heals a stale replica as a side effect of every read.
+
+```bash
+# 1. Write a key and note which nodes own it
+curl -X PUT "http://localhost:8080/kv/put?key=rr&value=v1"
+curl "http://localhost:8080/kv/ring?key=rr"
+# e.g. ["localhost:8081","localhost:8082","localhost:8080"]
+
+# 2. Inject an outdated value directly on one owner, simulating divergence
+curl -X POST "http://localhost:8081/kv/internal/replicate" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"rr","value":"STALE","timestamp":1}'
+
+# 3. Confirm 8081 is stale
+curl "http://localhost:8081/kv/internal/get?key=rr"
+# {"value":"STALE","timestamp":1}
+
+# 4. Issue a normal read — quorum picks the highest timestamp (v1), then repairs 8081
+curl "http://localhost:8080/kv/get?key=rr"
+# v1
+
+# 5. 8081 is now repaired (read repair runs async, allow ~1s)
+curl "http://localhost:8081/kv/internal/get?key=rr"
+# {"value":"v1","timestamp":<actual timestamp>}
+```
+
+---
+
+### 7. Gossip membership (`GossipService`)
+
+```bash
+# 1. All 4 nodes should appear as ALIVE after a few gossip rounds (~2-3s)
+curl -s "http://localhost:8080/kv/members" | python3 -m json.tool
+
+# 2. Watch heartbeats increment every second (gossip.interval.ms=1000)
+watch -n1 "curl -s localhost:8080/kv/members | python3 -m json.tool"
+
+# 3. Gossip convergence — any node should have the same membership view
+curl -s "http://localhost:8081/kv/members" | python3 -m json.tool
+curl -s "http://localhost:8082/kv/members" | python3 -m json.tool
+# All should agree on which nodes are ALIVE/DEAD
+```
+
+---
+
+### 8. Failure detection and indirect probe (`GossipService`)
+
+The ALIVE → SUSPECT → DEAD pipeline:
+
+| Time after kill | Event |
+|---|---|
+| 0s | Kill a node |
+| ~5s (`gossip.suspect.timeout.ms`) | Surviving nodes mark it `SUSPECT` |
+| ~10s (`gossip.dead.timeout.ms`) | Indirect probe triggered: 2 live peers try to reach the suspect |
+| ~10s | All probes fail → node declared `DEAD`, removed from ring |
+
+```bash
+# 1. Kill node 8082 (Ctrl-C in its tab)
+
+# 2. Poll membership from a surviving node
+watch -n1 "curl -s localhost:8080/kv/members | python3 -m json.tool"
+# ~5s:  "localhost:8082": { "state": "SUSPECT", ... }
+# ~10s: "localhost:8082": { "state": "DEAD", ... }
+
+# 3. Confirm 8082 is removed from the ring — its keys route elsewhere
+curl "http://localhost:8080/kv/ring?key=somekey"
+# 8082 should no longer appear
+```
+
+**Testing indirect probe success (node reachable via peers but not from us):**
+
+```bash
+# Indirect probe fires automatically before declaring DEAD.
+# To observe it: watch the logs of a surviving node — you will see:
+#   "Indirect probe via localhost:8081 to localhost:8082 failed"
+# followed by:
+#   "Node localhost:8082 declared dead ... indirect probes failed"
+
+# Or trigger a probe manually:
+curl -X POST "http://localhost:8080/kv/internal/probe?target=localhost:8082"
+# true  (if 8082 is up)
+# false (if 8082 is down)
+```
+
+---
+
+### 9. Node recovery and incarnation numbers (`GossipService` / `loadIncarnation`)
+
+Incarnation numbers fix the resurrection bug: a restarted node (heartbeat reset to 0) must override the cluster's cached DEAD entry with a higher heartbeat. Without incarnation, the cluster would discard the reset heartbeat as stale and keep the node DEAD forever.
+
+```bash
+# 1. Kill 8082 and wait ~10s for it to go DEAD
+curl "http://localhost:8080/kv/members"
+# "localhost:8082": { "state": "DEAD", "incarnation": 1 }
+
+# 2. Restart 8082
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8082
+# Logs: "Node incarnation: 2"  (read from incarnation_8082.dat, incremented)
+
+# 3. Within one gossip round (~1s), 8082 is back as ALIVE
+curl "http://localhost:8080/kv/members"
+# "localhost:8082": { "state": "ALIVE", "incarnation": 2, "heartbeat": 1, ... }
+```
+
+---
+
+### 10. WAL persistence and compaction (`FileLogStore` / `CompactionService`)
+
+```bash
+# 1. Write several values to the same key
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v1"
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v2"
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v3"
+
+# 2. Inspect the raw WAL (one append per write)
+cat kvstore_8080.log
+# persist,v1,<ts>
+# persist,v2,<ts>
+# persist,v3,<ts>
+
+# 3. Kill node 8080 and restart — it recovers from the WAL
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8080
+curl "http://localhost:8080/kv/internal/get?key=persist"
+# {"value":"v3","timestamp":<ts>}   — latest value restored
+
+# 4. After 60 seconds (CompactionService), the WAL is compacted to one line per key
+cat kvstore_8080.log
+# persist,v3,<ts>   — only the latest entry remains
 ```
 
 ---
@@ -375,6 +662,8 @@ src/main/java/com/aazim/kvstore/
 ├── model/
 │   ├── Hint.java                        Pending write for a down node
 │   ├── LogEntry.java                    WAL record
+│   ├── MemberInfo.java                  Gossip membership entry (address, state, heartbeat, incarnation, lastSeen)
+│   ├── NodeState.java                   Membership state enum (ALIVE, SUSPECT, DEAD)
 │   ├── ReplicationRequest.java          Inter-node write payload
 │   └── ValueEntry.java                  Value + Lamport timestamp
 ├── replication/
@@ -382,6 +671,7 @@ src/main/java/com/aazim/kvstore/
 │   ├── AsyncReplicationStrategy.java    Fire-and-forget replication
 │   ├── AsyncSender.java                 @Async HTTP sender with hint fallback
 │   ├── ConsistentHashRing.java          Virtual-node ring, preference lists
+│   ├── GossipService.java               Gossip membership, failure detection, ring integration
 │   ├── HintStore.java                   In-memory hint buffer per node
 │   ├── HintedHandoffService.java        Scheduled hint delivery (every 5s)
 │   ├── MerkleTree.java                  16-bucket SHA-256 Merkle tree
@@ -413,6 +703,7 @@ src/main/java/com/aazim/kvstore/
 
 ## What's Not Implemented Yet
 
-- **Gossip protocol** — membership is static config; nodes cannot discover each other or detect failures without polling; `addNode`/`removeNode` on the ring exist but are not wired to any membership event
 - **Tombstones for deletes** — there is no delete operation; a deleted key must be overwritten; a node that missed the deletion will re-introduce the value during read repair or anti-entropy
 - **Request routing** — a non-owner coordinator in async mode may return `null` for keys it does not hold locally; proper routing would transparently forward to a preference list node
+- **Phi-accrual failure detector** — false positives are reduced via indirect probing (SWIM-style), but the suspect/dead timeouts are still fixed; a phi-accrual detector would adapt thresholds based on observed inter-arrival times for finer-grained accuracy under variable load
+- **Delta gossip** — each gossip round sends the full membership table; in large clusters this should be limited to entries whose heartbeat changed since the last round

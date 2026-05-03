@@ -17,7 +17,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -29,10 +28,8 @@ public class AntiEntropyService {
     private final RestTemplate restTemplate;
     private final KeyValService keyValService;
     private final ConsistentHashRing ring;
+    private final GossipService gossipService;
     private final WebServerApplicationContext context;
-
-    @Value("${Nodes}")
-    private String nodesConfig;
 
     @Value("${replication.factor:3}")
     private int replicationFactor;
@@ -40,10 +37,12 @@ public class AntiEntropyService {
     private String selfNode;
 
     public AntiEntropyService(RestTemplate restTemplate, @Lazy KeyValService keyValService,
-                              ConsistentHashRing ring, WebServerApplicationContext context) {
+                              ConsistentHashRing ring, GossipService gossipService,
+                              WebServerApplicationContext context) {
         this.restTemplate = restTemplate;
         this.keyValService = keyValService;
         this.ring = ring;
+        this.gossipService = gossipService;
         this.context = context;
     }
 
@@ -56,8 +55,7 @@ public class AntiEntropyService {
     public void runAntiEntropy() {
         if (selfNode == null) return;
 
-        List<String> peers = Arrays.stream(nodesConfig.split(","))
-                .map(String::trim)
+        List<String> peers = gossipService.getLiveMembers().stream()
                 .filter(n -> !n.equals(selfNode))
                 .toList();
 
@@ -72,29 +70,31 @@ public class AntiEntropyService {
 
     private void syncWithPeer(String peer) {
         MerkleTree localTree = new MerkleTree(keyValService.getAll());
-        log.debug("Anti-entropy starting with {}", peer);
-        compareAndSync(peer, localTree, 0);
-    }
 
-    // Recursively walks the Merkle tree top-down, stopping at matching subtrees.
-    // Only divergent leaf buckets trigger actual data exchange.
-    private void compareAndSync(String peer, MerkleTree localTree, int nodeIndex) {
-        String peerHash;
+        String[] peerHashes;
         try {
-            peerHash = restTemplate.getForObject(
-                    "http://" + peer + "/kv/internal/merkle/hash/" + nodeIndex, String.class);
+            peerHashes = restTemplate.getForObject(
+                    "http://" + peer + "/kv/internal/merkle/tree", String[].class);
         } catch (Exception e) {
-            log.warn("Failed to fetch merkle hash from {} at node {}: {}", peer, nodeIndex, e.getMessage());
+            log.warn("Failed to fetch merkle tree from {}: {}", peer, e.getMessage());
             return;
         }
 
-        if (peerHash == null || peerHash.equals(localTree.getHash(nodeIndex))) return;
+        if (peerHashes == null) return;
+
+        // Diff both trees locally — no further HTTP calls until a diverged bucket is found.
+        findDivergedBuckets(peer, localTree, peerHashes, 0);
+    }
+
+    private void findDivergedBuckets(String peer, MerkleTree localTree, String[] peerHashes, int nodeIndex) {
+        if (nodeIndex >= peerHashes.length) return;
+        if (localTree.getHash(nodeIndex).equals(peerHashes[nodeIndex])) return;
 
         if (localTree.isLeaf(nodeIndex)) {
             syncBucket(peer, localTree, localTree.bucketIndexForLeaf(nodeIndex));
         } else {
-            compareAndSync(peer, localTree, localTree.leftChild(nodeIndex));
-            compareAndSync(peer, localTree, localTree.rightChild(nodeIndex));
+            findDivergedBuckets(peer, localTree, peerHashes, localTree.leftChild(nodeIndex));
+            findDivergedBuckets(peer, localTree, peerHashes, localTree.rightChild(nodeIndex));
         }
     }
 

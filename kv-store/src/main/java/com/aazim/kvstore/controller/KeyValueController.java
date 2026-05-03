@@ -3,8 +3,10 @@ package com.aazim.kvstore.controller;
 import java.util.List;
 import java.util.Map;
 
+import com.aazim.kvstore.model.MemberInfo;
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.replication.ConsistentHashRing;
+import com.aazim.kvstore.replication.GossipService;
 import com.aazim.kvstore.replication.HintStore;
 import com.aazim.kvstore.replication.MerkleTree;
 import com.aazim.kvstore.service.KeyValService;
@@ -22,14 +24,17 @@ public class KeyValueController {
     private final KeyValService service;
     private final HintStore hintStore;
     private final ConsistentHashRing ring;
+    private final GossipService gossipService;
 
     @Value("${replication.factor:3}")
     private int replicationFactor;
 
-    public KeyValueController(KeyValService service, HintStore hintStore, ConsistentHashRing ring) {
+    public KeyValueController(KeyValService service, HintStore hintStore,
+                              ConsistentHashRing ring, GossipService gossipService) {
         this.service = service;
         this.hintStore = hintStore;
         this.ring = ring;
+        this.gossipService = gossipService;
     }
 
     @PutMapping("/put")
@@ -73,15 +78,40 @@ public class KeyValueController {
         return ring.getPreferenceList(key, replicationFactor);
     }
 
-    // Anti-entropy: return the hash at a given node index in this node's Merkle tree.
-    @GetMapping("/internal/merkle/hash/{nodeIndex}")
-    public String merkleHash(@PathVariable int nodeIndex) {
-        return new MerkleTree(service.getAll()).getHash(nodeIndex);
+    // Anti-entropy: return all 2*BUCKET_COUNT-1 hashes in one shot so the
+    // initiator can diff the entire tree locally without further round-trips.
+    @GetMapping("/internal/merkle/tree")
+    public String[] merkleTree() {
+        return new MerkleTree(service.getAll()).getAllHashes();
     }
 
     // Anti-entropy: return all key-value entries in the given bucket.
     @GetMapping("/internal/merkle/bucket/{bucketIndex}")
     public Map<String, ValueEntry> merkleBucket(@PathVariable int bucketIndex) {
         return new MerkleTree(service.getAll()).getBucketEntries(bucketIndex);
+    }
+
+    // Debug: hash at a specific node index (kept for manual inspection).
+    @GetMapping("/internal/merkle/hash/{nodeIndex}")
+    public String merkleHash(@PathVariable int nodeIndex) {
+        return new MerkleTree(service.getAll()).getHash(nodeIndex);
+    }
+
+    // Gossip: receive a peer's membership table, merge it, return ours.
+    @PostMapping("/internal/gossip")
+    public Map<String, MemberInfo> gossip(@RequestBody Map<String, MemberInfo> incoming) {
+        return gossipService.merge(incoming);
+    }
+
+    // Indirect probe: another node suspects `target` and asks us to verify reachability.
+    @PostMapping("/internal/probe")
+    public boolean probe(@RequestParam String target) {
+        return gossipService.canReach(target);
+    }
+
+    // Debug: current membership view as seen by this node.
+    @GetMapping("/members")
+    public Map<String, MemberInfo> members() {
+        return gossipService.getMembers();
     }
 }

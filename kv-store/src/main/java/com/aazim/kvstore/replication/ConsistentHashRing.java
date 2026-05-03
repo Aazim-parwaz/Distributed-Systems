@@ -42,13 +42,13 @@ public class ConsistentHashRing {
                  distinct, VIRTUAL_NODES, ring.size());
     }
 
-    public void addNode(String node) {
+    public synchronized void addNode(String node) {
         for (int i = 0; i < VIRTUAL_NODES; i++) {
             ring.put(hash(node + "#" + i), node);
         }
     }
 
-    public void removeNode(String node) {
+    public synchronized void removeNode(String node) {
         for (int i = 0; i < VIRTUAL_NODES; i++) {
             ring.remove(hash(node + "#" + i));
         }
@@ -59,7 +59,7 @@ public class ConsistentHashRing {
      * for {@code key}, walking clockwise from the key's hash position on the ring.
      * The first node in the list is the primary (coordinator-preferred) owner.
      */
-    public List<String> getPreferenceList(String key, int count) {
+    public synchronized List<String> getPreferenceList(String key, int count) {
         if (ring.isEmpty()) return new ArrayList<>();
         long keyHash = hash(key);
         Set<String> result = new LinkedHashSet<>();

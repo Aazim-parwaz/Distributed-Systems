@@ -82,7 +82,22 @@ public class MerkleTree {
         return Collections.unmodifiableMap(buckets.getOrDefault(bucketIndex, Collections.emptyMap()));
     }
 
+    public String[] getAllHashes() {
+        return hashes.clone();
+    }
+
     public static int bucketFor(String key) {
-        return Math.abs(key.hashCode()) % BUCKET_COUNT;
+        try {
+            byte[] h = MessageDigest.getInstance("SHA-256")
+                    .digest(key.getBytes(StandardCharsets.UTF_8));
+            // Combine first 4 bytes into an unsigned 32-bit value, then take modulo.
+            // SHA-256 output is uniformly distributed so buckets stay balanced regardless
+            // of key naming patterns (avoids the clustering that String.hashCode() causes).
+            long unsigned = ((long)(h[0] & 0xFF) << 24) | ((long)(h[1] & 0xFF) << 16)
+                          | ((long)(h[2] & 0xFF) << 8)  | ((long)(h[3] & 0xFF));
+            return (int)(unsigned % BUCKET_COUNT);
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
     }
 }
