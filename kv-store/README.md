@@ -363,74 +363,288 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 
 ---
 
-## Testing Scenarios
+## Testing Each Service
 
-### Basic write and read
+Start a 4-node cluster first — open four terminal tabs and run one per tab:
+
 ```bash
-curl -X PUT "http://localhost:8080/kv/put?key=name&value=alice"
-curl "http://localhost:8081/kv/get?key=name"
+# Tab 1
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8080
+# Tab 2
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8081
+# Tab 3
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8082
+# Tab 4
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 ```
 
-### Verify key ownership
+---
+
+### 1. Basic reads and writes (`KeyValueController`)
+
 ```bash
+# Write via any coordinator
+curl -X PUT "http://localhost:8080/kv/put?key=name&value=alice"
+# SUCCESS
+
+# Read from a different node — replication should have delivered it
+curl "http://localhost:8081/kv/get?key=name"
+# alice
+```
+
+---
+
+### 2. Consistent hashing (`ConsistentHashRing`)
+
+```bash
+# See which 3 nodes own a key
 curl "http://localhost:8080/kv/ring?key=name"
 # e.g. ["localhost:8082","localhost:8080","localhost:8081"]
+
+# The 4th node is NOT in the list and should return 404 for that key
+# (find the node that is not in the preference list above and query it directly)
+curl "http://localhost:8083/kv/internal/get?key=name"
+# null (not found — 8083 is not an owner of "name")
+
+# Different keys land on different owners
+curl "http://localhost:8080/kv/ring?key=foo"
+curl "http://localhost:8080/kv/ring?key=bar"
+# Expect different node orderings
 ```
 
-### Hinted handoff
+---
+
+### 3. Replication modes (`AsyncReplicationStrategy` / `QuorumReplicationStrategy`)
+
+#### Async (default)
+
 ```bash
-# 1. Stop node 8081
-# 2. Write via 8080
-curl -X PUT "http://localhost:8080/kv/put?key=x&value=100"
-# 3. Check hints buffered on coordinator
+# Write returns immediately without waiting for replicas
+curl -X PUT "http://localhost:8080/kv/put?key=async_test&value=1"
+# SUCCESS — returned before peer ACKs
+
+# Read from another owner — may briefly return stale or null before replication completes
+curl "http://localhost:8081/kv/get?key=async_test"
+```
+
+#### Quorum
+
+Set `replication.mode=quorum` in `application.properties`, rebuild, and restart:
+
+```bash
+# Write blocks until W=2 nodes ACK
+curl -X PUT "http://localhost:8080/kv/put?key=quorum_test&value=1"
+
+# Stop one non-coordinator owner (e.g. 8081) — write still succeeds (W=2, need 1 more ACK)
+# Stop two owners — write should fail (cannot reach quorum)
+```
+
+---
+
+### 4. Hinted handoff (`HintStore` / `HintedHandoffService`)
+
+```bash
+# 1. Find the preference list for key "hh"
+curl "http://localhost:8080/kv/ring?key=hh"
+# e.g. ["localhost:8081","localhost:8082","localhost:8080"]
+
+# 2. Kill 8081 (Ctrl-C in its tab)
+
+# 3. Write via a node that IS up (coordinator will try 8081, fail, store a hint)
+curl -X PUT "http://localhost:8080/kv/put?key=hh&value=buffered"
+
+# 4. Confirm hint is buffered on the coordinator
 curl "http://localhost:8080/kv/hints"
 # {"localhost:8081": 1}
 
-# 4. Restart node 8081 — within 5 seconds hints are delivered
-curl "http://localhost:8081/kv/get?key=x"
-# 100
+# 5. Restart 8081 — HintedHandoffService retries every 5 seconds
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8081
+
+# 6. After ≤5s, hint is delivered and hints count drops to 0
+curl "http://localhost:8080/kv/hints"
+# {}
+
+# 7. Confirm 8081 has the key
+curl "http://localhost:8081/kv/get?key=hh"
+# buffered
 ```
 
-### Anti-entropy (simulate orphaned write)
+---
+
+### 5. Anti-entropy (`AntiEntropyService` / `MerkleTree`)
+
+Anti-entropy repairs divergence that hinted handoff would never know about (e.g. a partial quorum write, or a node that was down when a coordinator crashed before delivering hints).
+
 ```bash
-# 1. Inject a key directly to one node only, bypassing replication
+# 1. Inject a key directly into one node only — bypasses replication entirely
 curl -X POST "http://localhost:8080/kv/internal/replicate" \
   -H "Content-Type: application/json" \
-  -d '{"key":"orphan","value":"val","timestamp":1000}'
+  -d '{"key":"orphan","value":"only-on-8080","timestamp":9999}'
 
-# 2. Confirm divergence via Merkle root
-curl "http://localhost:8080/kv/internal/merkle/hash/0"   # differs
-curl "http://localhost:8081/kv/internal/merkle/hash/0"   # differs
-
-# 3. Wait one anti-entropy cycle (anti.entropy.delay.ms)
-# 4. All owners of "orphan" now have it
+# 2. Confirm 8081 does not have it yet
 curl "http://localhost:8081/kv/internal/get?key=orphan"
+# null
+
+# 3. Check that the Merkle root hashes differ between 8080 and 8081
+curl "http://localhost:8080/kv/internal/merkle/hash/0"
+curl "http://localhost:8081/kv/internal/merkle/hash/0"
+# Different values — divergence confirmed
+
+# 4. Wait one anti-entropy cycle (anti.entropy.delay.ms, default 50000ms)
+#    Speed this up by temporarily lowering anti.entropy.delay.ms=5000 in config
+
+# 5. After the cycle, all owners have the key
+curl "http://localhost:8081/kv/internal/get?key=orphan"
+# {"value":"only-on-8080","timestamp":9999}
+
+# 6. Roots should now match
+curl "http://localhost:8080/kv/internal/merkle/hash/0"
+curl "http://localhost:8081/kv/internal/merkle/hash/0"
+# Same value
 ```
 
-### Read repair
+**Inspect the full Merkle tree (31 nodes for a 16-bucket tree):**
+
 ```bash
-# Write via 8080, then read via 8082
-# Quorum read queries all preference list nodes, picks the latest,
-# and silently repairs any stale replica in the background
-curl "http://localhost:8082/kv/get?key=x"
+curl "http://localhost:8080/kv/internal/merkle/tree"
+# ["<root-hash>", "<left-child>", "<right-child>", ...]
+
+# Fetch all entries in a specific bucket (0–15)
+curl "http://localhost:8080/kv/internal/merkle/bucket/3"
 ```
 
-### Gossip and failure detection
+---
+
+### 6. Read repair (`KeyValService` / `QuorumReplicationStrategy`)
+
+Read repair silently heals a stale replica as a side effect of every read.
+
 ```bash
-# 1. Check membership table on any node
-curl "http://localhost:8080/kv/members"
-# All 4 nodes should appear as ALIVE
+# 1. Write a key and note which nodes own it
+curl -X PUT "http://localhost:8080/kv/put?key=rr&value=v1"
+curl "http://localhost:8080/kv/ring?key=rr"
+# e.g. ["localhost:8081","localhost:8082","localhost:8080"]
 
-# 2. Kill node 8081 (Ctrl-C or kill the process)
-# 3. After 5 seconds, 8081 transitions to SUSPECT on surviving nodes
-# 4. After 10 seconds, 8081 transitions to DEAD and is removed from the ring
-curl "http://localhost:8080/kv/members"
-# localhost:8081 shows state: DEAD
+# 2. Inject an outdated value directly on one owner, simulating divergence
+curl -X POST "http://localhost:8081/kv/internal/replicate" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"rr","value":"STALE","timestamp":1}'
 
-# 5. Restart 8081
-# 6. Within one gossip round (1s), 8081 re-appears as ALIVE
+# 3. Confirm 8081 is stale
+curl "http://localhost:8081/kv/internal/get?key=rr"
+# {"value":"STALE","timestamp":1}
+
+# 4. Issue a normal read — quorum picks the highest timestamp (v1), then repairs 8081
+curl "http://localhost:8080/kv/get?key=rr"
+# v1
+
+# 5. 8081 is now repaired (read repair runs async, allow ~1s)
+curl "http://localhost:8081/kv/internal/get?key=rr"
+# {"value":"v1","timestamp":<actual timestamp>}
+```
+
+---
+
+### 7. Gossip membership (`GossipService`)
+
+```bash
+# 1. All 4 nodes should appear as ALIVE after a few gossip rounds (~2-3s)
+curl -s "http://localhost:8080/kv/members" | python3 -m json.tool
+
+# 2. Watch heartbeats increment every second (gossip.interval.ms=1000)
+watch -n1 "curl -s localhost:8080/kv/members | python3 -m json.tool"
+
+# 3. Gossip convergence — any node should have the same membership view
+curl -s "http://localhost:8081/kv/members" | python3 -m json.tool
+curl -s "http://localhost:8082/kv/members" | python3 -m json.tool
+# All should agree on which nodes are ALIVE/DEAD
+```
+
+---
+
+### 8. Failure detection and indirect probe (`GossipService`)
+
+The ALIVE → SUSPECT → DEAD pipeline:
+
+| Time after kill | Event |
+|---|---|
+| 0s | Kill a node |
+| ~5s (`gossip.suspect.timeout.ms`) | Surviving nodes mark it `SUSPECT` |
+| ~10s (`gossip.dead.timeout.ms`) | Indirect probe triggered: 2 live peers try to reach the suspect |
+| ~10s | All probes fail → node declared `DEAD`, removed from ring |
+
+```bash
+# 1. Kill node 8082 (Ctrl-C in its tab)
+
+# 2. Poll membership from a surviving node
+watch -n1 "curl -s localhost:8080/kv/members | python3 -m json.tool"
+# ~5s:  "localhost:8082": { "state": "SUSPECT", ... }
+# ~10s: "localhost:8082": { "state": "DEAD", ... }
+
+# 3. Confirm 8082 is removed from the ring — its keys route elsewhere
+curl "http://localhost:8080/kv/ring?key=somekey"
+# 8082 should no longer appear
+```
+
+**Testing indirect probe success (node reachable via peers but not from us):**
+
+```bash
+# Indirect probe fires automatically before declaring DEAD.
+# To observe it: watch the logs of a surviving node — you will see:
+#   "Indirect probe via localhost:8081 to localhost:8082 failed"
+# followed by:
+#   "Node localhost:8082 declared dead ... indirect probes failed"
+
+# Or trigger a probe manually:
+curl -X POST "http://localhost:8080/kv/internal/probe?target=localhost:8082"
+# true  (if 8082 is up)
+# false (if 8082 is down)
+```
+
+---
+
+### 9. Node recovery and incarnation numbers (`GossipService` / `loadIncarnation`)
+
+Incarnation numbers fix the resurrection bug: a restarted node (heartbeat reset to 0) must override the cluster's cached DEAD entry with a higher heartbeat. Without incarnation, the cluster would discard the reset heartbeat as stale and keep the node DEAD forever.
+
+```bash
+# 1. Kill 8082 and wait ~10s for it to go DEAD
 curl "http://localhost:8080/kv/members"
-# localhost:8081 shows state: ALIVE
+# "localhost:8082": { "state": "DEAD", "incarnation": 1 }
+
+# 2. Restart 8082
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8082
+# Logs: "Node incarnation: 2"  (read from incarnation_8082.dat, incremented)
+
+# 3. Within one gossip round (~1s), 8082 is back as ALIVE
+curl "http://localhost:8080/kv/members"
+# "localhost:8082": { "state": "ALIVE", "incarnation": 2, "heartbeat": 1, ... }
+```
+
+---
+
+### 10. WAL persistence and compaction (`FileLogStore` / `CompactionService`)
+
+```bash
+# 1. Write several values to the same key
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v1"
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v2"
+curl -X PUT "http://localhost:8080/kv/put?key=persist&value=v3"
+
+# 2. Inspect the raw WAL (one append per write)
+cat kvstore_8080.log
+# persist,v1,<ts>
+# persist,v2,<ts>
+# persist,v3,<ts>
+
+# 3. Kill node 8080 and restart — it recovers from the WAL
+java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8080
+curl "http://localhost:8080/kv/internal/get?key=persist"
+# {"value":"v3","timestamp":<ts>}   — latest value restored
+
+# 4. After 60 seconds (CompactionService), the WAL is compacted to one line per key
+cat kvstore_8080.log
+# persist,v3,<ts>   — only the latest entry remains
 ```
 
 ---

@@ -120,6 +120,14 @@ public class GossipService {
     }
 
     private void gossipWith(String peer) {
+        // if (
+        //     (selfNode.equals("localhost:8081") && peer.equals("localhost:8083")) ||
+        //     (selfNode.equals("localhost:8082") && peer.equals("localhost:8083")) ||
+        //     (selfNode.equals("localhost:8083") &&
+        //         (peer.equals("localhost:8081") || peer.equals("localhost:8082")))
+        // ) {
+        //     throw new RuntimeException("Full isolation of 8083");
+        // }
         try {
             Map<String, MemberInfo> peerTable = restTemplate.exchange(
                     "http://" + peer + "/kv/internal/gossip",
@@ -181,8 +189,10 @@ public class GossipService {
                 // Before declaring dead, ask random live peers to try reaching the node.
                 // A GC-paused or high-load node may be unreachable from us but fine from others.
                 if (indirectProbeSucceeds(node)) {
-                    members.put(node, new MemberInfo(node, NodeState.ALIVE, info.getHeartbeat(), monotonicMs(), info.getIncarnation()));
-                    log.info("Node {} passed indirect probe, kept alive", node);
+                    // Stay SUSPECT — only an advancing heartbeat via gossip can restore ALIVE.
+                    // Resetting lastSeen gives the node one more full timeout window.
+                    members.put(node, new MemberInfo(node, NodeState.SUSPECT, info.getHeartbeat(), monotonicMs(), info.getIncarnation()));
+                    log.info("Node {} passed indirect probe, keeping SUSPECT and resetting timer", node);
                 } else {
                     members.put(node, new MemberInfo(node, NodeState.DEAD, info.getHeartbeat(), info.getLastSeen(), info.getIncarnation()));
                     ring.removeNode(node);
