@@ -3,6 +3,7 @@ package com.aazim.kvstore.replication;
 import com.aazim.kvstore.model.MemberInfo;
 import com.aazim.kvstore.model.NodeState;
 
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,6 +17,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -26,6 +28,7 @@ public class GossipService {
 
     private static final Logger log = LoggerFactory.getLogger(GossipService.class);
     private static final int FANOUT = 3;
+    private static final int INDIRECT_PROBE_PEERS = 2;
 
     private final ConcurrentHashMap<String, MemberInfo> members = new ConcurrentHashMap<>();
     private final RestTemplate restTemplate;
@@ -36,6 +39,9 @@ public class GossipService {
     @Value("${Nodes}")
     private String nodesConfig;
 
+    @Value("${node.id}")
+    private String nodeId;
+
     @Value("${gossip.suspect.timeout.ms:5000}")
     private long suspectTimeout;
 
@@ -43,6 +49,7 @@ public class GossipService {
     private long deadTimeout;
 
     private String selfNode;
+    private long ownIncarnation;
 
     public GossipService(RestTemplate restTemplate, ConsistentHashRing ring,
                          WebServerApplicationContext context) {
@@ -51,19 +58,42 @@ public class GossipService {
         this.context = context;
     }
 
+    // Runs at startup before the web server is ready. Loads the persisted incarnation
+    // number and increments it so this run is distinguishable from all prior runs.
+    // A restarted node's heartbeat resets to 0, but its incarnation is always higher
+    // than what the cluster has cached — so gossip will accept its updates again.
+    @PostConstruct
+    public void loadIncarnation() {
+        File file = new File("incarnation_" + nodeId + ".dat");
+        long current = 0;
+        if (file.exists()) {
+            try (BufferedReader r = new BufferedReader(new FileReader(file))) {
+                String line = r.readLine();
+                if (line != null) current = Long.parseLong(line.trim());
+            } catch (Exception e) {
+                log.warn("Could not read incarnation file, starting from 0");
+            }
+        }
+        ownIncarnation = current + 1;
+        try (PrintWriter w = new PrintWriter(new FileWriter(file))) {
+            w.println(ownIncarnation);
+        } catch (Exception e) {
+            log.error("Failed to persist incarnation: {}", e.getMessage());
+        }
+        log.info("Node incarnation: {}", ownIncarnation);
+    }
+
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         selfNode = "localhost:" + context.getWebServer().getPort();
         long now = monotonicMs();
 
-        members.put(selfNode, new MemberInfo(selfNode, NodeState.ALIVE, 0, now));
+        members.put(selfNode, new MemberInfo(selfNode, NodeState.ALIVE, 0, now, ownIncarnation));
 
-        // Seed the table with all known nodes. lastSeen = now gives them
-        // suspectTimeout grace before failure detection kicks in.
         Arrays.stream(nodesConfig.split(","))
               .map(String::trim)
               .filter(n -> !n.isEmpty() && !n.equals(selfNode))
-              .forEach(n -> members.put(n, new MemberInfo(n, NodeState.ALIVE, 0, now)));
+              .forEach(n -> members.put(n, new MemberInfo(n, NodeState.ALIVE, 0, now, 0)));
 
         log.info("Gossip initialized on {}, seeded {} peers", selfNode, members.size() - 1);
     }
@@ -72,15 +102,14 @@ public class GossipService {
     public void gossipRound() {
         if (selfNode == null) return;
 
-        // Advance own heartbeat.
         members.compute(selfNode, (k, v) ->
                 new MemberInfo(k, NodeState.ALIVE,
                         v == null ? 1 : v.getHeartbeat() + 1,
-                        monotonicMs()));
+                        monotonicMs(),
+                        ownIncarnation));
 
         detectFailures();
 
-        // Pick up to FANOUT non-dead peers at random.
         List<String> candidates = members.entrySet().stream()
                 .filter(e -> !e.getKey().equals(selfNode) && e.getValue().getState() != NodeState.DEAD)
                 .map(Map.Entry::getKey)
@@ -105,8 +134,6 @@ public class GossipService {
         }
     }
 
-    // Called both when we receive a gossip push and when we reply to one.
-    // Returns our current membership table so the caller can merge it too.
     public Map<String, MemberInfo> merge(Map<String, MemberInfo> incoming) {
         long now = monotonicMs();
 
@@ -117,18 +144,24 @@ public class GossipService {
             boolean isNew = !members.containsKey(node);
 
             members.merge(node, received, (existing, recv) -> {
-                if (recv.getHeartbeat() <= existing.getHeartbeat()) return existing;
+                // Stale info from a previous run of this node — ignore.
+                if (recv.getIncarnation() < existing.getIncarnation()) return existing;
+
+                // Same incarnation and no newer heartbeat — nothing to update.
+                if (recv.getIncarnation() == existing.getIncarnation()
+                        && recv.getHeartbeat() <= existing.getHeartbeat()) return existing;
 
                 NodeState newState = recv.getState() == NodeState.DEAD ? NodeState.DEAD : NodeState.ALIVE;
 
                 if (existing.getState() == NodeState.DEAD && newState == NodeState.ALIVE) {
                     ring.addNode(node);
-                    log.info("Node {} recovered, re-added to ring", node);
+                    log.info("Node {} recovered (incarnation {}), re-added to ring", node, recv.getIncarnation());
                 }
-                return new MemberInfo(node, newState, recv.getHeartbeat(), now);
+                return new MemberInfo(node, newState, recv.getHeartbeat(), now, recv.getIncarnation());
             });
 
-            if (isNew) {
+            // Only add genuinely new, non-dead nodes to the ring.
+            if (isNew && received.getState() != NodeState.DEAD) {
                 ring.addNode(node);
                 log.info("Discovered new node {}, added to ring", node);
             }
@@ -145,17 +178,57 @@ public class GossipService {
             long elapsed = now - info.getLastSeen();
 
             if (elapsed > deadTimeout) {
-                members.put(node, new MemberInfo(node, NodeState.DEAD, info.getHeartbeat(), info.getLastSeen()));
-                ring.removeNode(node);
-                log.warn("Node {} declared dead ({}ms since last heartbeat), removed from ring", node, elapsed);
+                // Before declaring dead, ask random live peers to try reaching the node.
+                // A GC-paused or high-load node may be unreachable from us but fine from others.
+                if (indirectProbeSucceeds(node)) {
+                    members.put(node, new MemberInfo(node, NodeState.ALIVE, info.getHeartbeat(), monotonicMs(), info.getIncarnation()));
+                    log.info("Node {} passed indirect probe, kept alive", node);
+                } else {
+                    members.put(node, new MemberInfo(node, NodeState.DEAD, info.getHeartbeat(), info.getLastSeen(), info.getIncarnation()));
+                    ring.removeNode(node);
+                    log.warn("Node {} declared dead ({}ms elapsed, indirect probes failed), removed from ring", node, elapsed);
+                }
             } else if (elapsed > suspectTimeout && info.getState() == NodeState.ALIVE) {
-                members.put(node, new MemberInfo(node, NodeState.SUSPECT, info.getHeartbeat(), info.getLastSeen()));
+                members.put(node, new MemberInfo(node, NodeState.SUSPECT, info.getHeartbeat(), info.getLastSeen(), info.getIncarnation()));
                 log.warn("Node {} is suspect ({}ms since last heartbeat)", node, elapsed);
             }
         });
     }
 
-    // Returns all nodes that are ALIVE or SUSPECT (still potentially reachable).
+    // Asks up to INDIRECT_PROBE_PEERS random live nodes to try reaching the target.
+    // Returns true if any peer confirms the target is reachable.
+    private boolean indirectProbeSucceeds(String target) {
+        List<String> probers = members.entrySet().stream()
+                .filter(e -> !e.getKey().equals(selfNode)
+                        && !e.getKey().equals(target)
+                        && e.getValue().getState() == NodeState.ALIVE)
+                .map(Map.Entry::getKey)
+                .limit(INDIRECT_PROBE_PEERS)
+                .toList();
+
+        for (String prober : probers) {
+            try {
+                Boolean reachable = restTemplate.postForObject(
+                        "http://" + prober + "/kv/internal/probe?target=" + target,
+                        null, Boolean.class);
+                if (Boolean.TRUE.equals(reachable)) return true;
+            } catch (Exception e) {
+                log.debug("Indirect probe via {} to {} failed: {}", prober, target, e.getMessage());
+            }
+        }
+        return false;
+    }
+
+    // Called by the probe endpoint — tries to reach target and reports reachability.
+    public boolean canReach(String target) {
+        try {
+            restTemplate.getForObject("http://" + target + "/kv/members", Object.class);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public List<String> getLiveMembers() {
         return members.entrySet().stream()
                 .filter(e -> e.getValue().getState() != NodeState.DEAD)
@@ -167,9 +240,6 @@ public class GossipService {
         return Collections.unmodifiableMap(members);
     }
 
-    // Monotonic milliseconds — immune to NTP adjustments and system clock changes.
-    // Used exclusively for lastSeen, which is a local elapsed-time measurement.
-    // Never compare these values across nodes; they have no absolute meaning.
     private static long monotonicMs() {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
     }

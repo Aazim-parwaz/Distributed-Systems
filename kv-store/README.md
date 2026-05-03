@@ -14,7 +14,7 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 | Read repair | Stale replicas are healed automatically on every read |
 | Hinted handoff | Writes to down nodes are buffered and replayed when the node recovers |
 | Anti-entropy | Merkle tree comparison between peers proactively finds and repairs all divergence |
-| Gossip membership | Nodes discover each other and detect failures via infection-style gossip; dead nodes are removed from the ring automatically |
+| Gossip membership | Nodes discover each other and detect failures via infection-style gossip; dead nodes are removed from the ring automatically; incarnation numbers fix the resurrection bug; indirect probing reduces false positives |
 | WAL persistence | Every write is appended to a per-node log file; full state recovers on restart |
 | Log compaction | WAL is compacted every 60 seconds, keeping only the latest value per key |
 
@@ -69,9 +69,9 @@ A Dynamo-style distributed key-value store built from scratch in Java (Spring Bo
 |  |              GossipService (background)                | |
 |  |  - Every 1s: increment heartbeat, detect failures      | |
 |  |  - Push full membership table to 3 random live peers   | |
-|  |  - Merge rule: higher heartbeat wins, lastSeen local   | |
-|  |  - ALIVE --> SUSPECT (5s) --> DEAD (10s) + ring.remove | |
-|  |  - Recovery: DEAD --> ALIVE on heartbeat advance       | |
+|  |  - Merge rule: (incarnation, heartbeat) wins, lastSeen local| |
+|  |  - ALIVE → SUSPECT (5s) → indirect probe → DEAD (10s) | |
+|  |  - Recovery: DEAD → ALIVE via incarnation number bump  | |
 |  +--------------------------------------------------------+ |
 +--------------------------------------------------------------+
 ```
@@ -171,25 +171,36 @@ Both mechanisms repair diverged nodes, but they are complementary — neither re
 Each node maintains a local membership table (`ConcurrentHashMap<String, MemberInfo>`) tracking the state of every known peer. Every gossip round (default 1 second):
 
 1. Increment own heartbeat counter.
-2. Run failure detection — advance peers through `ALIVE → SUSPECT → DEAD` based on elapsed time since last heartbeat.
+2. Run failure detection — advance peers through `ALIVE → SUSPECT → DEAD` based on elapsed time since last heartbeat, with indirect probing before the final transition.
 3. Pick up to 3 random live peers and `POST /internal/gossip` with the full local table. Merge the peer's response.
 
-When a node is declared `DEAD` it is removed from the consistent hash ring immediately. When it recovers and resumes sending heartbeats, it is re-added to the ring and anti-entropy syncs any data it missed.
+When a node is declared `DEAD` it is removed from the consistent hash ring immediately. When it recovers, gossip detects the higher incarnation number and re-adds it to the ring. Anti-entropy then syncs any data it missed while it was down.
 
 ### Failure detection
 
 ```
 elapsed = now - lastSeen  (measured with System.nanoTime(), never wall clock)
 
-elapsed > 5s  AND state == ALIVE   -->  SUSPECT
-elapsed > 10s AND state != DEAD    -->  DEAD  +  ring.removeNode()
+elapsed > 5s  AND state == ALIVE   →  SUSPECT
+elapsed > 10s AND state != DEAD    →  ask 2 random live peers to probe the suspect
+                                       any probe succeeds? → reset to ALIVE
+                                       all probes fail?    → DEAD + ring.removeNode()
 ```
 
 `lastSeen` is reset to the receiver's local monotonic clock on every merge — it is never propagated in gossip messages. This prevents stale timestamps from remote nodes corrupting local timeout decisions.
 
+Indirect probing distinguishes a truly dead node from one that is briefly unreachable from us but still reachable from the rest of the cluster (asymmetric network, transient GC pause). Only if all probers confirm the node is unreachable is it declared dead.
+
 ### Merge rule
 
-For each entry in an incoming membership table: if the incoming heartbeat counter is higher than the local one, the node is reachable — update state to `ALIVE` and reset `lastSeen`. If the incoming heartbeat is equal or lower, discard it as stale.
+The merge key is `(incarnation, heartbeat)`:
+
+- `recv.incarnation < existing.incarnation` — stale info from a previous run of that node, discard.
+- `recv.incarnation > existing.incarnation` — node restarted; always wins regardless of heartbeat. Triggers `DEAD → ALIVE` recovery and `ring.addNode()`.
+- same incarnation, `recv.heartbeat > existing.heartbeat` — heartbeat advanced; node is reachable, update to `ALIVE`.
+- same incarnation, `recv.heartbeat <= existing.heartbeat` — stale or duplicate, discard.
+
+Incarnation numbers are persisted to `incarnation_<nodeId>.dat` and incremented on every restart. This fixes the resurrection bug: a restarted node whose heartbeat resets to 0 would previously be ignored forever because the cluster held a higher heartbeat from the dead entry.
 
 ---
 
@@ -348,6 +359,7 @@ java -jar target/kv-store-0.0.1-SNAPSHOT.jar --spring.profiles.active=8083
 | `GET` | `/kv/internal/merkle/hash/{nodeIndex}` | Merkle tree hash at given node index (root = 0) |
 | `GET` | `/kv/internal/merkle/bucket/{bucketIndex}` | All key-value entries in a Merkle bucket (0–15) |
 | `POST` | `/kv/internal/gossip` | Receive a peer's membership table; merge and return local table |
+| `POST` | `/kv/internal/probe?target=` | Indirect probe: check if this node can reach `target`; used before declaring a node dead |
 
 ---
 
@@ -436,7 +448,7 @@ src/main/java/com/aazim/kvstore/
 ├── model/
 │   ├── Hint.java                        Pending write for a down node
 │   ├── LogEntry.java                    WAL record
-│   ├── MemberInfo.java                  Gossip membership entry (address, state, heartbeat, lastSeen)
+│   ├── MemberInfo.java                  Gossip membership entry (address, state, heartbeat, incarnation, lastSeen)
 │   ├── NodeState.java                   Membership state enum (ALIVE, SUSPECT, DEAD)
 │   ├── ReplicationRequest.java          Inter-node write payload
 │   └── ValueEntry.java                  Value + Lamport timestamp
@@ -479,5 +491,5 @@ src/main/java/com/aazim/kvstore/
 
 - **Tombstones for deletes** — there is no delete operation; a deleted key must be overwritten; a node that missed the deletion will re-introduce the value during read repair or anti-entropy
 - **Request routing** — a non-owner coordinator in async mode may return `null` for keys it does not hold locally; proper routing would transparently forward to a preference list node
-- **Phi-accrual failure detector** — gossip uses fixed suspect/dead timeouts; a phi-accrual detector would adapt thresholds based on observed inter-arrival times, reducing false positives under variable load
+- **Phi-accrual failure detector** — false positives are reduced via indirect probing (SWIM-style), but the suspect/dead timeouts are still fixed; a phi-accrual detector would adapt thresholds based on observed inter-arrival times for finer-grained accuracy under variable load
 - **Delta gossip** — each gossip round sends the full membership table; in large clusters this should be limited to entries whose heartbeat changed since the last round

@@ -103,6 +103,12 @@ public class KeyValueController {
         return gossipService.merge(incoming);
     }
 
+    // Indirect probe: another node suspects `target` and asks us to verify reachability.
+    @PostMapping("/internal/probe")
+    public boolean probe(@RequestParam String target) {
+        return gossipService.canReach(target);
+    }
+
     // Debug: current membership view as seen by this node.
     @GetMapping("/members")
     public Map<String, MemberInfo> members() {
