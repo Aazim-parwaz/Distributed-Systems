@@ -50,11 +50,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     }
 
     @Override
-    public boolean replicate(String key, String value, long timestamp) {
-        // Replicate only to the preference list peers, not the entire cluster.
+    public boolean replicate(String key, String value, long timestamp, boolean deleted) {
         ring.getPreferenceList(key, replicationFactor).stream()
             .filter(n -> !n.equals(selfNode))
-            .forEach(node -> asyncSender.send(node, new ReplicationRequest(key, value, timestamp)));
+            .forEach(node -> asyncSender.send(node, new ReplicationRequest(key, value, timestamp, deleted)));
         return true;
     }
 
@@ -116,10 +115,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
                 if (res.getNode().equals(selfNode)) {
-                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
+                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted());
                 } else {
                     asyncSender.send(res.getNode(),
-                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()));
+                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted()));
                 }
             }
         }

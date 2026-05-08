@@ -59,7 +59,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     }
 
     @Override
-    public boolean replicate(String key, String value, long timestamp) {
+    public boolean replicate(String key, String value, long timestamp, boolean deleted) {
         List<String> preferenceList = ring.getPreferenceList(key, replicationFactor);
         List<String> peers = preferenceList.stream()
                 .filter(n -> !n.equals(selfNode))
@@ -71,13 +71,13 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
 
         // Count self as an ACK only if this node is in the preference list for the key.
         int successCount = preferenceList.contains(selfNode) ? 1 : 0;
-        log.debug("replicate key={} preferenceList={} quorum={}", key, preferenceList, effectiveQuorum);
+        log.debug("replicate key={} deleted={} preferenceList={} quorum={}", key, deleted, preferenceList, effectiveQuorum);
 
         for (String node : peers) {
             try {
                 Boolean response = restTemplate.postForObject(
                         "http://" + node + "/kv/internal/replicate",
-                        new ReplicationRequest(key, value, timestamp),
+                        new ReplicationRequest(key, value, timestamp, deleted),
                         Boolean.class);
 
                 if (Boolean.TRUE.equals(response)) {
@@ -89,7 +89,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
                 }
             } catch (Exception e) {
                 log.warn("Failed to replicate to {}: {}", node, e.getMessage());
-                hintStore.store(node, new Hint(key, value, timestamp));
+                hintStore.store(node, new Hint(key, value, timestamp, deleted));
             }
         }
 
@@ -169,12 +169,12 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
                 if (res.getNode().equals(selfNode)) {
-                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
+                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted());
                 } else {
                     try {
                         restTemplate.postForObject(
                                 "http://" + res.getNode() + "/kv/internal/replicate",
-                                new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()),
+                                new ReplicationRequest(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted()),
                                 Boolean.class);
                         log.info("Read repair sent to {} for key={}", res.getNode(), key);
                     } catch (Exception e) {

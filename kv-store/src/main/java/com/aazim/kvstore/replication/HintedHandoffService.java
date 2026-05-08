@@ -48,7 +48,7 @@ public class HintedHandoffService {
                 try {
                     restTemplate.postForObject(
                         "http://" + node + "/kv/internal/replicate",
-                        new ReplicationRequest(hint.getKey(), hint.getValue(), hint.getTimestamp()),
+                        new ReplicationRequest(hint.getKey(), hint.getValue(), hint.getTimestamp(), hint.isDeleted()),
                         Boolean.class);
                     log.info("Delivered hint to {} key={}", node, hint.getKey());
                 } catch (Exception e) {

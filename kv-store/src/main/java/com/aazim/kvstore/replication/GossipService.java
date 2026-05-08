@@ -136,13 +136,20 @@ public class GossipService {
                     new ParameterizedTypeReference<Map<String, MemberInfo>>() {}
             ).getBody();
 
-            if (peerTable != null) merge(peerTable);
+            if (peerTable != null) merge(peerTable, true);
         } catch (Exception e) {
             log.debug("Gossip to {} failed: {}", peer, e.getMessage());
         }
     }
 
-    public Map<String, MemberInfo> merge(Map<String, MemberInfo> incoming) {
+    // direct=true  → called after a successful outbound gossip exchange with `peer`;
+    //                 equal heartbeat still refreshes lastSeen because the HTTP response
+    //                 itself proves the node is reachable (third-party pre-delivery can
+    //                 otherwise prevent lastSeen from updating, causing false suspects).
+    // direct=false → called when a peer pushes its table to us via POST /internal/gossip;
+    //                 equal heartbeat is treated as stale so zombie nodes (HTTP up,
+    //                 scheduler frozen, heartbeat not advancing) are still detected.
+    public Map<String, MemberInfo> merge(Map<String, MemberInfo> incoming, boolean direct) {
         long now = monotonicMs();
 
         for (Map.Entry<String, MemberInfo> entry : incoming.entrySet()) {
@@ -155,9 +162,10 @@ public class GossipService {
                 // Stale info from a previous run of this node — ignore.
                 if (recv.getIncarnation() < existing.getIncarnation()) return existing;
 
-                // Same incarnation and no newer heartbeat — nothing to update.
+                // Same incarnation: skip if heartbeat is older, or equal on an indirect path.
                 if (recv.getIncarnation() == existing.getIncarnation()
-                        && recv.getHeartbeat() <= existing.getHeartbeat()) return existing;
+                        && (recv.getHeartbeat() < existing.getHeartbeat()
+                            || (recv.getHeartbeat() == existing.getHeartbeat() && !direct))) return existing;
 
                 NodeState newState = recv.getState() == NodeState.DEAD ? NodeState.DEAD : NodeState.ALIVE;
 

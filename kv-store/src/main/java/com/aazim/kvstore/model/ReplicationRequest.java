@@ -4,6 +4,7 @@ public class ReplicationRequest {
     private String key;
     private String value;
     private long ts;
+    private boolean deleted;
 
     public ReplicationRequest() {}
 
@@ -13,12 +14,22 @@ public class ReplicationRequest {
         this.ts = ts;
     }
 
-    public String getKey() { return key; }
-    public void setKey(String key) { this.key = key; }
+    public ReplicationRequest(String key, String value, long ts, boolean deleted) {
+        this.key = key;
+        this.value = value;
+        this.ts = ts;
+        this.deleted = deleted;
+    }
 
-    public String getValue() { return value; }
-    public void setValue(String value) { this.value = value; }
+    public String getKey()              { return key; }
+    public void setKey(String key)      { this.key = key; }
 
-    public long getTimestamp() { return ts; }
-    public void setTimestamp(long ts) { this.ts = ts; }
+    public String getValue()            { return value; }
+    public void setValue(String value)  { this.value = value; }
+
+    public long getTimestamp()          { return ts; }
+    public void setTimestamp(long ts)   { this.ts = ts; }
+
+    public boolean isDeleted()              { return deleted; }
+    public void setDeleted(boolean deleted) { this.deleted = deleted; }
 }
