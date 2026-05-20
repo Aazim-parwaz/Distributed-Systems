@@ -5,7 +5,7 @@ import java.util.List;
 import com.aazim.kvstore.model.ValueEntry;
 // strategy interface for replication and quorum reads
 public interface ReplicationStrategy {
-    boolean replicate(String key, String value, long timestamp);
+    boolean replicate(String key, String value, long timestamp, boolean deleted);
     List<String> getNodes();
     // ValueEntry fetchFromNode(String node, String key);
     // strategy-based read --> why localValue is needed here ? to compare with remote value and decide which one to return based on timestamp (last write wins)

@@ -120,8 +120,8 @@ public class AntiEntropyService {
             if (!ring.getPreferenceList(e.getKey(), replicationFactor).contains(selfNode)) continue;
             ValueEntry local = localEntries.get(e.getKey());
             if (local == null || e.getValue().getTimestamp() > local.getTimestamp()) {
-                keyValService.putInternal(e.getKey(), e.getValue().getValue(), e.getValue().getTimestamp());
-                log.debug("Anti-entropy: pulled key={} from {}", e.getKey(), peer);
+                keyValService.putInternal(e.getKey(), e.getValue().getValue(), e.getValue().getTimestamp(), e.getValue().isDeleted());
+                log.debug("Anti-entropy: pulled key={} deleted={} from {}", e.getKey(), e.getValue().isDeleted(), peer);
             }
         }
 
@@ -133,9 +133,9 @@ public class AntiEntropyService {
                 try {
                     restTemplate.postForObject(
                             "http://" + peer + "/kv/internal/replicate",
-                            new ReplicationRequest(e.getKey(), e.getValue().getValue(), e.getValue().getTimestamp()),
+                            new ReplicationRequest(e.getKey(), e.getValue().getValue(), e.getValue().getTimestamp(), e.getValue().isDeleted()),
                             Boolean.class);
-                    log.debug("Anti-entropy: pushed key={} to {}", e.getKey(), peer);
+                    log.debug("Anti-entropy: pushed key={} deleted={} to {}", e.getKey(), e.getValue().isDeleted(), peer);
                 } catch (Exception ex) {
                     log.warn("Anti-entropy: failed to push key={} to {}: {}", e.getKey(), peer, ex.getMessage());
                 }

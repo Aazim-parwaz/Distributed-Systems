@@ -56,25 +56,34 @@ public class KeyValService {
         selfNode = "localhost:" + context.getWebServer().getPort();
     }
 
-    // Follower write path — timestamp already assigned by coordinator.
-    public void putInternal(String key, String value, long ts) {
-        clock.update(ts);  // advance our clock past what we've seen
+    // Follower write/delete path — timestamp already assigned by coordinator.
+    public void putInternal(String key, String value, long ts, boolean deleted) {
+        clock.update(ts);
         ValueEntry existing = store.get(key);
         if (existing == null || ts > existing.getTimestamp()) {
-            store.put(key, new ValueEntry(value, ts));
-            logStore.append(key, value, ts);
+            store.put(key, new ValueEntry(value, ts, deleted));
+            logStore.append(key, value, ts, deleted);
         }
     }
 
-    // Coordinator write path. Replicates to the ring-determined preference list first.
-    // Only writes locally if this node is in the preference list for the key — with
-    // consistent hashing, a coordinator that isn't an owner should not store the data.
+    // Coordinator write path.
     public boolean put(String key, String value) {
         long ts = clock.tick();
-        boolean success = replicationStrategy == null || replicationStrategy.replicate(key, value, ts);
+        boolean success = replicationStrategy == null || replicationStrategy.replicate(key, value, ts, false);
         if (success && isOwner(key)) {
             store.put(key, new ValueEntry(value, ts));
-            logStore.append(key, value, ts);
+            logStore.append(key, value, ts, false);
+        }
+        return success;
+    }
+
+    // Coordinator delete path — replicates a tombstone then stores it locally.
+    public boolean delete(String key) {
+        long ts = clock.tick();
+        boolean success = replicationStrategy == null || replicationStrategy.replicate(key, null, ts, true);
+        if (success && isOwner(key)) {
+            store.put(key, new ValueEntry(null, ts, true));
+            logStore.append(key, null, ts, true);
         }
         return success;
     }
@@ -86,10 +95,8 @@ public class KeyValService {
 
     public ValueEntry read(String key) {
         ValueEntry localValue = store.get(key);
-        if (replicationStrategy != null) {
-            return replicationStrategy.read(key, localValue);
-        }
-        return localValue;
+        ValueEntry result = replicationStrategy != null ? replicationStrategy.read(key, localValue) : localValue;
+        return (result != null && result.isDeleted()) ? null : result;
     }
 
     public Map<String, ValueEntry> getAll() {
@@ -105,7 +112,7 @@ public class KeyValService {
         for (LogEntry entry : entries) {
             ValueEntry existing = store.get(entry.getKey());
             if (existing == null || entry.getTimestamp() > existing.getTimestamp()) {
-                store.put(entry.getKey(), new ValueEntry(entry.getValue(), entry.getTimestamp()));
+                store.put(entry.getKey(), new ValueEntry(entry.getValue(), entry.getTimestamp(), entry.isDeleted()));
             }
         }
         System.out.println("Recovery completed. Loaded keys: " + store.size());

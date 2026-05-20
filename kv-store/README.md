@@ -300,10 +300,12 @@ anti.entropy.delay.ms=50000     # how often anti-entropy runs (ms)
 gossip.interval.ms=1000         # gossip round interval
 gossip.suspect.timeout.ms=5000  # ms without heartbeat before SUSPECT
 gossip.dead.timeout.ms=10000    # ms without heartbeat before DEAD
-Nodes=localhost:8080,localhost:8081,localhost:8082,localhost:8083
+Nodes=localhost:8080,localhost:8081,localhost:8082,localhost:8083  # bootstrap seed list for gossip only
 ```
 
-Per-node peer config (recommended — avoids self in node list):
+`Nodes` is a gossip bootstrap seed list — a minimal set of contacts used to start the first gossip exchange. After the first round, the live membership table maintained by gossip takes over. Replication routing (`getNodes()` in both strategies) reads from the gossip-maintained live membership, not from this property.
+
+Per-node seed config (recommended — each node lists its peers as seeds, not itself):
 
 ```properties
 # application-8080.properties
@@ -703,7 +705,6 @@ src/main/java/com/aazim/kvstore/
 
 ## What's Not Implemented Yet
 
-- **Tombstones for deletes** — there is no delete operation; a deleted key must be overwritten; a node that missed the deletion will re-introduce the value during read repair or anti-entropy
-- **Request routing** — a non-owner coordinator in async mode may return `null` for keys it does not hold locally; proper routing would transparently forward to a preference list node
 - **Phi-accrual failure detector** — false positives are reduced via indirect probing (SWIM-style), but the suspect/dead timeouts are still fixed; a phi-accrual detector would adapt thresholds based on observed inter-arrival times for finer-grained accuracy under variable load
 - **Delta gossip** — each gossip round sends the full membership table; in large clusters this should be limited to entries whose heartbeat changed since the last round
+- **Sloppy quorum** — under partial preference-list failures, writes are rejected rather than overflowing to non-owner nodes with hinted handoff back to the real owner

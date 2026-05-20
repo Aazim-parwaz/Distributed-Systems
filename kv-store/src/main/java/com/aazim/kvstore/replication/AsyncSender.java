@@ -29,7 +29,7 @@ public class AsyncSender {
             log.info("Replicated to {} key={}", node, request.getKey());
         } catch (Exception e) {
             log.warn("Failed to reach {}, storing hint for key={}", node, request.getKey());
-            hintStore.store(node, new Hint(request.getKey(), request.getValue(), request.getTimestamp()));
+            hintStore.store(node, new Hint(request.getKey(), request.getValue(), request.getTimestamp(), request.isDeleted()));
         }
     }
 }

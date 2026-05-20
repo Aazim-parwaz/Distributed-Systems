@@ -30,10 +30,10 @@ public class FileLogStore implements LogStore {
     }
 
     @Override
-    public void append(String key, String value, long timestamp) {
+    public void append(String key, String value, long timestamp, boolean deleted) {
         synchronized (writeLock) {
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(LOG_FILE, true))) {
-                writer.write(key + "," + value + "," + timestamp);
+                writer.write(key + "," + (value != null ? value : "") + "," + timestamp + "," + deleted);
                 writer.newLine();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -51,12 +51,13 @@ public class FileLogStore implements LogStore {
         try (BufferedReader reader = new BufferedReader(new FileReader(LOG_FILE))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(",", 3);
-                if (parts.length == 3) {
+                String[] parts = line.split(",", 4);
+                if (parts.length >= 3) {
                     String key = parts[0];
                     String value = parts[1];
                     long timestamp = Long.parseLong(parts[2]);
-                    entries.add(new LogEntry(key, value, timestamp));
+                    boolean deleted = parts.length == 4 && Boolean.parseBoolean(parts[3]);
+                    entries.add(new LogEntry(key, value, timestamp, deleted));
                 }
             }
         } catch (IOException e) {
@@ -75,7 +76,8 @@ public class FileLogStore implements LogStore {
         synchronized (writeLock) {
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(tempFile))) {
                 for (Map.Entry<String, ValueEntry> entry : latestState.entrySet()) {
-                    writer.write(entry.getKey() + "," + entry.getValue().getValue() + "," + entry.getValue().getTimestamp());
+                    ValueEntry v = entry.getValue();
+                    writer.write(entry.getKey() + "," + (v.getValue() != null ? v.getValue() : "") + "," + v.getTimestamp() + "," + v.isDeleted());
                     writer.newLine();
                 }
             } catch (IOException e) {

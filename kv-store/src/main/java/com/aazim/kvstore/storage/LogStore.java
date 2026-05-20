@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 public interface LogStore {
-    void append(String key, String value, long timestamp);
+    void append(String key, String value, long timestamp, boolean deleted);
 
     List<LogEntry> readAll();
 

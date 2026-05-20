@@ -1,10 +1,11 @@
 package com.aazim.kvstore.replication;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.web.context.WebServerApplicationContext;
@@ -13,6 +14,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import com.aazim.kvstore.model.NodeState;
 import com.aazim.kvstore.model.ReplicationRequest;
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
@@ -20,14 +22,14 @@ import com.aazim.kvstore.service.KeyValService;
 @Component
 public class AsyncReplicationStrategy implements ReplicationStrategy {
 
+    private static final Logger log = LoggerFactory.getLogger(AsyncReplicationStrategy.class);
+
     private final RestTemplate restTemplate;
     private final WebServerApplicationContext context;
     private final AsyncSender asyncSender;
     private final KeyValService keyValService;
     private final ConsistentHashRing ring;
-
-    @Value("${Nodes}")
-    private String nodesConfig;
+    private final GossipService gossipService;
 
     @Value("${replication.factor:3}")
     private int replicationFactor;
@@ -36,12 +38,13 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
 
     public AsyncReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context,
                                     AsyncSender asyncSender, @Lazy KeyValService keyValService,
-                                    ConsistentHashRing ring) {
+                                    ConsistentHashRing ring, GossipService gossipService) {
         this.restTemplate = restTemplate;
         this.context = context;
         this.asyncSender = asyncSender;
         this.keyValService = keyValService;
         this.ring = ring;
+        this.gossipService = gossipService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -50,26 +53,40 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
     }
 
     @Override
-    public boolean replicate(String key, String value, long timestamp) {
-        // Replicate only to the preference list peers, not the entire cluster.
+    public boolean replicate(String key, String value, long timestamp, boolean deleted) {
         ring.getPreferenceList(key, replicationFactor).stream()
             .filter(n -> !n.equals(selfNode))
-            .forEach(node -> asyncSender.send(node, new ReplicationRequest(key, value, timestamp)));
+            .forEach(node -> asyncSender.send(node, new ReplicationRequest(key, value, timestamp, deleted)));
         return true;
     }
 
     @Override
     public List<String> getNodes() {
-        return Arrays.stream(nodesConfig.split(","))
-                     .map(String::trim)
-                     .filter(n -> !n.equals(selfNode))
-                     .toList();
+        return gossipService.getMembers().entrySet().stream()
+                .filter(e -> !e.getKey().equals(selfNode) && e.getValue().getState() != NodeState.DEAD)
+                .map(java.util.Map.Entry::getKey)
+                .toList();
     }
 
     @Override
     public ValueEntry read(String key, ValueEntry localValue) {
+        List<String> preferenceList = ring.getPreferenceList(key, replicationFactor);
+        if (!preferenceList.contains(selfNode)) {
+            return fetchFromPreferenceList(key, preferenceList);
+        }
         CompletableFuture.runAsync(() -> detectAndRepair(key, localValue));
         return localValue;
+    }
+
+    private ValueEntry fetchFromPreferenceList(String key, List<String> preferenceList) {
+        for (String node : preferenceList) {
+            try {
+                return restTemplate.getForObject("http://" + node + "/kv/internal/get?key=" + key, ValueEntry.class);
+            } catch (Exception e) {
+                log.debug("Forward read for key={} to {} failed: {}", key, node, e.getMessage());
+            }
+        }
+        return null;
     }
 
     private void detectAndRepair(String key, ValueEntry localValue) {
@@ -94,7 +111,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
             }));
         }
 
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .orTimeout(1000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .exceptionally(e -> null)
+                .join();
         futures.stream().map(f -> f.getNow(null)).filter(r -> r != null).forEach(responses::add);
 
         List<ValueEntry> validEntries = responses.stream()
@@ -116,10 +136,10 @@ public class AsyncReplicationStrategy implements ReplicationStrategy {
             ValueEntry entry = res.getEntry();
             if (entry == null || entry.getTimestamp() < latest.getTimestamp()) {
                 if (res.getNode().equals(selfNode)) {
-                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp());
+                    keyValService.putInternal(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted());
                 } else {
                     asyncSender.send(res.getNode(),
-                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp()));
+                            new ReplicationRequest(key, latest.getValue(), latest.getTimestamp(), latest.isDeleted()));
                 }
             }
         }

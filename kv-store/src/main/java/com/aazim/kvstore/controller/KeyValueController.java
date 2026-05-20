@@ -42,6 +42,13 @@ public class KeyValueController {
         return service.put(key, value) ? "SUCCESS" : "FAILURE";
     }
 
+    @DeleteMapping("/delete")
+    public ResponseEntity<String> delete(@RequestParam String key) {
+        return service.delete(key)
+                ? ResponseEntity.ok("DELETED")
+                : ResponseEntity.status(500).body("FAILURE");
+    }
+
     @GetMapping("/get")
     public ResponseEntity<String> get(@RequestParam String key) {
         ValueEntry entry = service.read(key);
@@ -52,11 +59,10 @@ public class KeyValueController {
         }
     }
 
-    // Follower write path — coordinator has already assigned the timestamp.
-    // putInternal handles last-write-wins internally; no need to re-check here.
+    // Follower write/delete path — coordinator has already assigned the timestamp.
     @PostMapping("/internal/replicate")
     public boolean replicate(@RequestBody ReplicationRequest request) {
-        service.putInternal(request.getKey(), request.getValue(), request.getTimestamp());
+        service.putInternal(request.getKey(), request.getValue(), request.getTimestamp(), request.isDeleted());
         return true;
     }
 
@@ -100,7 +106,7 @@ public class KeyValueController {
     // Gossip: receive a peer's membership table, merge it, return ours.
     @PostMapping("/internal/gossip")
     public Map<String, MemberInfo> gossip(@RequestBody Map<String, MemberInfo> incoming) {
-        return gossipService.merge(incoming);
+        return gossipService.merge(incoming, false);
     }
 
     // Indirect probe: another node suspects `target` and asks us to verify reachability.

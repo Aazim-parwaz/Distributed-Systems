@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpEntity;
@@ -19,6 +20,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -34,6 +36,7 @@ public class GossipService {
     private final RestTemplate restTemplate;
     private final ConsistentHashRing ring;
     private final WebServerApplicationContext context;
+    private final HintedHandoffService hintedHandoffService;
     private final Random random = new Random();
 
     @Value("${Nodes}")
@@ -48,14 +51,19 @@ public class GossipService {
     @Value("${gossip.dead.timeout.ms:10000}")
     private long deadTimeout;
 
+    @Value("${gossip.dead.gc.ms:300000}")
+    private long deadGcMs;
+
     private String selfNode;
     private long ownIncarnation;
 
     public GossipService(RestTemplate restTemplate, ConsistentHashRing ring,
-                         WebServerApplicationContext context) {
+                         WebServerApplicationContext context,
+                         @Lazy HintedHandoffService hintedHandoffService) {
         this.restTemplate = restTemplate;
         this.ring = ring;
         this.context = context;
+        this.hintedHandoffService = hintedHandoffService;
     }
 
     // Runs at startup before the web server is ready. Loads the persisted incarnation
@@ -116,7 +124,11 @@ public class GossipService {
                 .collect(Collectors.toCollection(ArrayList::new));
 
         Collections.shuffle(candidates, random);
-        candidates.stream().limit(FANOUT).forEach(this::gossipWith);
+        List<CompletableFuture<Void>> gossipFutures = candidates.stream()
+                .limit(FANOUT)
+                .map(peer -> CompletableFuture.runAsync(() -> gossipWith(peer)))
+                .toList();
+        CompletableFuture.allOf(gossipFutures.toArray(new CompletableFuture[0])).join();
     }
 
     private void gossipWith(String peer) {
@@ -136,13 +148,20 @@ public class GossipService {
                     new ParameterizedTypeReference<Map<String, MemberInfo>>() {}
             ).getBody();
 
-            if (peerTable != null) merge(peerTable);
+            if (peerTable != null) merge(peerTable, true);
         } catch (Exception e) {
             log.debug("Gossip to {} failed: {}", peer, e.getMessage());
         }
     }
 
-    public Map<String, MemberInfo> merge(Map<String, MemberInfo> incoming) {
+    // direct=true  → called after a successful outbound gossip exchange with `peer`;
+    //                 equal heartbeat still refreshes lastSeen because the HTTP response
+    //                 itself proves the node is reachable (third-party pre-delivery can
+    //                 otherwise prevent lastSeen from updating, causing false suspects).
+    // direct=false → called when a peer pushes its table to us via POST /internal/gossip;
+    //                 equal heartbeat is treated as stale so zombie nodes (HTTP up,
+    //                 scheduler frozen, heartbeat not advancing) are still detected.
+    public Map<String, MemberInfo> merge(Map<String, MemberInfo> incoming, boolean direct) {
         long now = monotonicMs();
 
         for (Map.Entry<String, MemberInfo> entry : incoming.entrySet()) {
@@ -155,15 +174,17 @@ public class GossipService {
                 // Stale info from a previous run of this node — ignore.
                 if (recv.getIncarnation() < existing.getIncarnation()) return existing;
 
-                // Same incarnation and no newer heartbeat — nothing to update.
+                // Same incarnation: skip if heartbeat is older, or equal on an indirect path.
                 if (recv.getIncarnation() == existing.getIncarnation()
-                        && recv.getHeartbeat() <= existing.getHeartbeat()) return existing;
+                        && (recv.getHeartbeat() < existing.getHeartbeat()
+                            || (recv.getHeartbeat() == existing.getHeartbeat() && !direct))) return existing;
 
                 NodeState newState = recv.getState() == NodeState.DEAD ? NodeState.DEAD : NodeState.ALIVE;
 
                 if (existing.getState() == NodeState.DEAD && newState == NodeState.ALIVE) {
                     ring.addNode(node);
                     log.info("Node {} recovered (incarnation {}), re-added to ring", node, recv.getIncarnation());
+                    CompletableFuture.runAsync(() -> hintedHandoffService.deliverHintsFor(node));
                 }
                 return new MemberInfo(node, newState, recv.getHeartbeat(), now, recv.getIncarnation());
             });
@@ -172,6 +193,7 @@ public class GossipService {
             if (isNew && received.getState() != NodeState.DEAD) {
                 ring.addNode(node);
                 log.info("Discovered new node {}, added to ring", node);
+                CompletableFuture.runAsync(() -> hintedHandoffService.deliverHintsFor(node));
             }
         }
 
@@ -181,7 +203,16 @@ public class GossipService {
     private void detectFailures() {
         long now = monotonicMs();
         members.forEach((node, info) -> {
-            if (node.equals(selfNode) || info.getState() == NodeState.DEAD) return;
+            if (node.equals(selfNode)) return;
+
+            if (info.getState() == NodeState.DEAD) {
+                // lastSeen is stamped at the moment of death — use it as the GC clock.
+                if ((now - info.getLastSeen()) > deadGcMs) {
+                    members.remove(node);
+                    log.info("Evicted stale DEAD node {} ({}ms since declared dead)", node, now - info.getLastSeen());
+                }
+                return;
+            }
 
             long elapsed = now - info.getLastSeen();
 
@@ -194,7 +225,8 @@ public class GossipService {
                     members.put(node, new MemberInfo(node, NodeState.SUSPECT, info.getHeartbeat(), monotonicMs(), info.getIncarnation()));
                     log.info("Node {} passed indirect probe, keeping SUSPECT and resetting timer", node);
                 } else {
-                    members.put(node, new MemberInfo(node, NodeState.DEAD, info.getHeartbeat(), info.getLastSeen(), info.getIncarnation()));
+                    // Stamp lastSeen = now so deadGcMs is measured from time of death, not last heartbeat.
+                    members.put(node, new MemberInfo(node, NodeState.DEAD, info.getHeartbeat(), now, info.getIncarnation()));
                     ring.removeNode(node);
                     log.warn("Node {} declared dead ({}ms elapsed, indirect probes failed), removed from ring", node, elapsed);
                 }
@@ -208,13 +240,14 @@ public class GossipService {
     // Asks up to INDIRECT_PROBE_PEERS random live nodes to try reaching the target.
     // Returns true if any peer confirms the target is reachable.
     private boolean indirectProbeSucceeds(String target) {
-        List<String> probers = members.entrySet().stream()
+        List<String> candidates = members.entrySet().stream()
                 .filter(e -> !e.getKey().equals(selfNode)
                         && !e.getKey().equals(target)
                         && e.getValue().getState() == NodeState.ALIVE)
                 .map(Map.Entry::getKey)
-                .limit(INDIRECT_PROBE_PEERS)
-                .toList();
+                .collect(Collectors.toCollection(ArrayList::new));
+        Collections.shuffle(candidates, random);
+        List<String> probers = candidates.stream().limit(INDIRECT_PROBE_PEERS).toList();
 
         for (String prober : probers) {
             try {
