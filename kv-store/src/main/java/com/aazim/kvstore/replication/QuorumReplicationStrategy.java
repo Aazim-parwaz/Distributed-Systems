@@ -1,9 +1,10 @@
 package com.aazim.kvstore.replication;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +17,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import com.aazim.kvstore.model.Hint;
+import com.aazim.kvstore.model.NodeState;
 import com.aazim.kvstore.model.ReplicationRequest;
 import com.aazim.kvstore.model.ValueEntry;
 import com.aazim.kvstore.service.KeyValService;
@@ -30,6 +32,7 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     private final KeyValService keyValService;
     private final HintStore hintStore;
     private final ConsistentHashRing ring;
+    private final GossipService gossipService;
 
     @Value("${write.quorum:2}")
     private int writeQuorum;
@@ -37,19 +40,17 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
     @Value("${replication.factor:3}")
     private int replicationFactor;
 
-    @Value("${Nodes}")
-    private String nodesConfig;
-
     private String selfNode;
 
     public QuorumReplicationStrategy(RestTemplate restTemplate, WebServerApplicationContext context,
                                      @Lazy KeyValService keyValService, HintStore hintStore,
-                                     ConsistentHashRing ring) {
+                                     ConsistentHashRing ring, GossipService gossipService) {
         this.restTemplate = restTemplate;
         this.context = context;
         this.keyValService = keyValService;
         this.hintStore = hintStore;
         this.ring = ring;
+        this.gossipService = gossipService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -70,40 +71,41 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
         int effectiveQuorum = Math.max(Math.min(writeQuorum, totalNodes), majority);
 
         // Count self as an ACK only if this node is in the preference list for the key.
-        int successCount = preferenceList.contains(selfNode) ? 1 : 0;
+        AtomicInteger successCount = new AtomicInteger(preferenceList.contains(selfNode) ? 1 : 0);
         log.debug("replicate key={} deleted={} preferenceList={} quorum={}", key, deleted, preferenceList, effectiveQuorum);
 
-        for (String node : peers) {
-            try {
-                Boolean response = restTemplate.postForObject(
-                        "http://" + node + "/kv/internal/replicate",
-                        new ReplicationRequest(key, value, timestamp, deleted),
-                        Boolean.class);
-
-                if (Boolean.TRUE.equals(response)) {
-                    successCount++;
-                    if (successCount >= effectiveQuorum) {
-                        log.debug("Write quorum achieved {}/{} for key={}", successCount, effectiveQuorum, key);
-                        return true;
+        List<CompletableFuture<Void>> futures = peers.stream()
+                .map(node -> CompletableFuture.runAsync(() -> {
+                    try {
+                        Boolean response = restTemplate.postForObject(
+                                "http://" + node + "/kv/internal/replicate",
+                                new ReplicationRequest(key, value, timestamp, deleted),
+                                Boolean.class);
+                        if (Boolean.TRUE.equals(response)) successCount.incrementAndGet();
+                    } catch (Exception e) {
+                        log.warn("Failed to replicate to {}: {}", node, e.getMessage());
+                        hintStore.store(node, new Hint(key, value, timestamp, deleted));
                     }
-                }
-            } catch (Exception e) {
-                log.warn("Failed to replicate to {}: {}", node, e.getMessage());
-                hintStore.store(node, new Hint(key, value, timestamp, deleted));
-            }
-        }
+                }))
+                .toList();
 
-        boolean met = successCount >= effectiveQuorum;
-        if (!met) log.warn("Write quorum NOT met {}/{} for key={}", successCount, effectiveQuorum, key);
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .orTimeout(1000, TimeUnit.MILLISECONDS)
+                .exceptionally(e -> null)
+                .join();
+
+        boolean met = successCount.get() >= effectiveQuorum;
+        if (met) log.debug("Write quorum achieved {}/{} for key={}", successCount.get(), effectiveQuorum, key);
+        else      log.warn("Write quorum NOT met {}/{} for key={}", successCount.get(), effectiveQuorum, key);
         return met;
     }
 
     @Override
     public List<String> getNodes() {
-        return Arrays.stream(nodesConfig.split(","))
-                     .map(String::trim)
-                     .filter(n -> !n.equals(selfNode))
-                     .toList();
+        return gossipService.getMembers().entrySet().stream()
+                .filter(e -> !e.getKey().equals(selfNode) && e.getValue().getState() != NodeState.DEAD)
+                .map(java.util.Map.Entry::getKey)
+                .toList();
     }
 
     @Override
@@ -135,7 +137,10 @@ public class QuorumReplicationStrategy implements ReplicationStrategy {
             }));
         }
 
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .orTimeout(1000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .exceptionally(e -> null)
+                .join();
 
         List<NodeResponse> responses = futures.stream()
                 .map(f -> f.getNow(null))

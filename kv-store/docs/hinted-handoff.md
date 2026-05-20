@@ -18,7 +18,11 @@ peer unreachable during replicate()
 
 ### Delivery (`HintedHandoffService`)
 
-Runs every 5 seconds. For each node with pending hints:
+Delivery fires on two paths:
+
+**Gossip-triggered (primary):** `GossipService.merge()` detects a DEAD→ALIVE recovery or a brand-new node joining the ring and immediately calls `hintedHandoffService.deliverHintsFor(node)` on a background thread. Hints reach the recovered node within one gossip round (~1s) rather than waiting for the next poll.
+
+**Scheduled fallback:** runs every 5 seconds as a safety net for hints that gossip-triggered delivery missed (e.g. the node came up between gossip rounds or the gossip notification was lost). For each node with pending hints:
 1. Drain all hints for that node from `HintStore`.
 2. Attempt `POST /internal/replicate` for each hint.
 3. If delivery succeeds — hint is discarded.
@@ -36,14 +40,11 @@ Runs every 5 seconds. For each node with pending hints:
 
 ## Known Drawbacks
 
-### 1. Hints are in-memory only
-`HintStore` is a `ConcurrentHashMap`. If the coordinator crashes before delivering hints, all buffered hints are lost. The recovering node must rely on anti-entropy to catch up instead.
+### 1. Delivery is sequential per node
+Hints for a given node are delivered one by one in a loop. For a node recovering after a long outage with many hints, delivery serialises all of them through a single HTTP call chain and holds the delivery thread for the full duration.
 
-### 2. No TTL on hints
-Hints accumulate indefinitely if a node stays down. On a busy cluster, a prolonged outage on one node can cause the coordinator's hint buffer to grow without bound, consuming memory.
-
-### 3. Coordinator dependency
-Hinted handoff only works if the coordinator that stored the hint is the one that delivers it. If the coordinator is replaced or restarted (without persisting hints), the target node misses those writes entirely and must wait for anti-entropy.
+### 2. Coordinator dependency
+Hints are disk-persisted and survive coordinator restarts. However, hinted handoff only captures failures that happened during `replicate()` on this coordinator. A write that was coordinated by a different node stores its hints there — if that coordinator is replaced or permanently lost, those specific hints go with it. Anti-entropy is the safety net for that case.
 
 ### 4. Delivery is sequential per node
 Hints for a given node are delivered one by one in a loop. For a node recovering after a long outage with thousands of hints, delivery is slow and ties up the scheduler thread.
@@ -55,8 +56,5 @@ Hinted handoff only captures failures that happen during `replicate()`. Silent d
 
 ## Future Improvements
 
-- **Persist hints to disk**: write hints to a WAL alongside the regular key-value log so they survive coordinator restarts. This eliminates the coordinator-dependency problem.
-- **TTL and size cap**: evict hints older than a configurable threshold (e.g. 1 hour) and cap the buffer size. Beyond that threshold, anti-entropy is expected to cover the gap.
-- **Parallel delivery**: deliver all hints for a recovering node concurrently (bounded parallelism) rather than sequentially, for faster catch-up.
-- **Gossip-triggered delivery**: instead of polling every 5 seconds, trigger hint delivery immediately when the gossip layer detects the target node has come back online.
-- **Batch delivery endpoint**: deliver all hints in a single `POST /internal/replicate/batch` call rather than one call per hint.
+- **Parallel delivery**: deliver all hints for a recovering node concurrently (bounded parallelism) rather than sequentially, for faster catch-up after long outages.
+- **Batch delivery endpoint**: deliver all hints in a single `POST /internal/replicate/batch` call rather than one call per hint. Pairs well with parallel delivery.

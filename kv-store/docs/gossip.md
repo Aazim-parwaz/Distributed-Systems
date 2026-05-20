@@ -90,10 +90,12 @@ Two distinct clocks are used and they must not be confused:
 ## Known Drawbacks
 
 ### 1. Seeds are still static config
-The initial peer list comes from `${Nodes}`. A completely new node joining a running cluster must be listed in config and requires a restart. There is no zero-config discovery.
+`${Nodes}` is the gossip bootstrap seed list. A completely new node joining a running cluster must be listed in config and requires a restart. There is no zero-config discovery.
 
-### 2. DEAD nodes are never fully forgotten
-Once a node enters `DEAD` state, it stays in the membership table indefinitely. In a long-running cluster with frequent node replacements, the table grows without bound.
+`${Nodes}` now serves exclusively as a bootstrap seed list — it is no longer read by the replication strategies. Both `QuorumReplicationStrategy` and `AsyncReplicationStrategy` call `gossipService.getMembers()` to discover peers at runtime, so nodes that joined dynamically (and are `ALIVE` or `SUSPECT` in the gossip table) are visible to the replication layer without any config change.
+
+### 2. DEAD node GC relies on a fixed wall-clock window
+DEAD nodes are evicted from the membership table after `gossip.dead.gc.ms` (default 5 minutes) has elapsed since they were declared dead. The eviction window is a tuning knob: too short and a node that recovers slowly may be forgotten before its incarnation bump arrives, causing it to re-enter as a brand-new node and miss the recovery path; too long and the table grows unnecessarily in clusters with high node churn.
 
 ### 3. No distinction between crash and network partition
 A node on the other side of a partition looks identical to a crashed node — both stop sending heartbeats. Gossip will declare it dead and remove it from the ring, potentially causing the ring to shrink below the replication factor on both sides of the partition. This is the standard availability vs. consistency trade-off in a leaderless system.

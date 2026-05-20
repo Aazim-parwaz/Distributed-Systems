@@ -26,43 +26,46 @@ public class HintedHandoffService {
         this.restTemplate = restTemplate;
     }
 
-    @Scheduled(fixedDelay = 5000) // Run every 5 seconds to check if node is up and deliver hints
+    // Fallback poll — catches any hints that gossip-triggered delivery missed
+    // (e.g. the node came up between gossip rounds or the recovery message was lost).
+    @Scheduled(fixedDelay = 5000)
     public void deliverPendingHints() {
         Set<String> nodes = hintStore.nodesWithHints();
         if (!nodes.isEmpty()) {
             log.info("Hint delivery tick — pending nodes: {}", nodes);
         }
+        nodes.forEach(this::deliverHintsFor);
+    }
 
-        for (String node : nodes) {
-            List<Hint> hints = hintStore.drain(node);
-            if (hints.isEmpty()) continue;
+    public void deliverHintsFor(String node) {
+        List<Hint> hints = hintStore.drain(node);
+        if (hints.isEmpty()) return;
 
-            List<Hint> undelivered = new ArrayList<>();
-            boolean nodeDown = false;
+        List<Hint> undelivered = new ArrayList<>();
+        boolean nodeDown = false;
 
-            for (Hint hint : hints) {
-                if (nodeDown) {
-                    undelivered.add(hint);
-                    continue;
-                }
-                try {
-                    restTemplate.postForObject(
-                        "http://" + node + "/kv/internal/replicate",
-                        new ReplicationRequest(hint.getKey(), hint.getValue(), hint.getTimestamp(), hint.isDeleted()),
-                        Boolean.class);
-                    log.info("Delivered hint to {} key={}", node, hint.getKey());
-                } catch (Exception e) {
-                    log.warn("{} still unreachable, requeueing {} hints", node, hints.size() - undelivered.size());
-                    undelivered.add(hint);
-                    nodeDown = true;
-                }
+        for (Hint hint : hints) {
+            if (nodeDown) {
+                undelivered.add(hint);
+                continue;
             }
-
-            if (!undelivered.isEmpty()) {
-                hintStore.restore(node, undelivered);
-            } else {
-                log.info("All {} hints delivered to {}", hints.size(), node);
+            try {
+                restTemplate.postForObject(
+                    "http://" + node + "/kv/internal/replicate",
+                    new ReplicationRequest(hint.getKey(), hint.getValue(), hint.getTimestamp(), hint.isDeleted()),
+                    Boolean.class);
+                log.info("Delivered hint to {} key={}", node, hint.getKey());
+            } catch (Exception e) {
+                log.warn("{} still unreachable, requeueing {} hints", node, hints.size() - undelivered.size());
+                undelivered.add(hint);
+                nodeDown = true;
             }
+        }
+
+        if (!undelivered.isEmpty()) {
+            hintStore.restore(node, undelivered);
+        } else {
+            log.info("All {} hints delivered to {}", hints.size(), node);
         }
     }
 }

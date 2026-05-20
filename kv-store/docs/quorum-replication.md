@@ -53,8 +53,8 @@ if (responses.size() < readQuorum) throw ...  // counts responders
 ```
 A node that responds with `null` (key not found) counts toward the quorum. A single replica holding a value is enough for it to win and be propagated via read repair, even if the original write was considered failed.
 
-### 4. Sequential write to peers
-Peers are contacted one by one. As soon as quorum is met, remaining peers are skipped. This means the last peer(s) in the preference list are only written to lazily (via anti-entropy or hinted handoff), creating a temporary replication imbalance.
+### 4. All peers always contacted on writes (minor latency overhead)
+All preference list peers are contacted in parallel and the write waits for the slowest to respond (up to the 1s `orTimeout` ceiling). Quorum is checked after all futures settle. A future optimisation is to short-circuit as soon as W ACKs arrive, cancelling remaining futures — at the cost of leaving some replicas unwritten until anti-entropy catches up.
 
 ### 5. Full fan-out on reads
 Every read contacts all preference list nodes in parallel. With replication factor 3, every read causes 2 extra internal HTTP calls even when the local value is up to date.
@@ -63,7 +63,7 @@ Every read contacts all preference list nodes in parallel. With replication fact
 
 ## Future Improvements
 
-- **Parallel writes up to quorum**: Contact all peers simultaneously and return as soon as W ACKs arrive, rather than sequentially. Reduces write latency significantly.
+- **Short-circuit on quorum**: Currently all peer futures run to completion (or timeout). Return as soon as W ACKs arrive and cancel remaining futures to reduce tail latency when quorum is met early.
 - **Sloppy quorum**: Allow writes to overflow to non-preference-list nodes when preference list nodes are down, with hinted handoff back to the real owner. Improves availability under partial failures.
 - **Versioned responses on reads**: Return a version/token alongside the value so clients can do conditional writes (compare-and-swap), enabling stronger consistency guarantees.
 - **Timeout per peer**: Configurable per-peer timeout on the write path so a slow peer does not stall the entire write.
